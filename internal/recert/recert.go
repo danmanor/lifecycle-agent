@@ -270,6 +270,55 @@ func createBaseRecertConfig() RecertConfig {
 	}
 }
 
+// CreateRecertConfigFileForIPConfig creates a recert config file for IP configuration changes
+func CreateRecertConfigFileForIPConfig(
+	oldIPs []string,
+	newIPs []string,
+	newMachineNetworks []string,
+	installConfig string,
+	cryptoDir string,
+	ingressCertificateCN string,
+	recertConfigFolder string,
+) error {
+	if len(oldIPs) != len(newIPs) {
+		return fmt.Errorf("oldIPs and newIPs must have the same length")
+	}
+
+	config := createBaseRecertConfig()
+	config.IP = newIPs
+	config.MachineNetworkCidr = newMachineNetworks
+	config.ExtendExpiration = true
+	config.InstallConfig = installConfig
+	config.SummaryFileClean = "/var/tmp/recert-summary.yaml"
+
+	for i := range newIPs {
+		config.CNSanReplaceRules = append(
+			config.CNSanReplaceRules, fmt.Sprintf("%s,%s", oldIPs[i], newIPs[i]),
+		)
+	}
+
+	if _, err := os.Stat(cryptoDir); err == nil {
+		ingressKeyFile, err := getIngressKeyPath(cryptoDir)
+		if err != nil {
+			return err
+		}
+		config.UseKeyRules = []string{
+			fmt.Sprintf("kube-apiserver-lb-signer %s/loadbalancer-serving-signer.key", cryptoDir),
+			fmt.Sprintf("kube-apiserver-localhost-signer %s/localhost-serving-signer.key", cryptoDir),
+			fmt.Sprintf("kube-apiserver-service-network-signer %s/service-network-serving-signer.key", cryptoDir),
+			fmt.Sprintf("%s %s/%s", ingressCertificateCN, cryptoDir, ingressKeyFile),
+		}
+		config.UseCertRules = []string{filepath.Join(cryptoDir, "admin-kubeconfig-client-ca.crt")}
+	}
+
+	p := filepath.Join(recertConfigFolder, RecertConfigFile)
+	if err := utils.MarshalToFile(config, p); err != nil {
+		return fmt.Errorf("failed to marshal recert config file to %s: %w", p, err)
+	}
+
+	return nil
+}
+
 func getIngressKeyPath(certsFolder string) (string, error) {
 	certsFiles, err := os.ReadDir(certsFolder)
 	if err != nil {

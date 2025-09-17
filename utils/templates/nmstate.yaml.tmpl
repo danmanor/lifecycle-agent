@@ -1,0 +1,41 @@
+interfaces:
+- name: {{ .InterfaceName }}
+  type: ethernet
+  state: up
+  ipv4:
+    enabled: false
+  ipv6:
+    enabled: false
+- name: br-ex
+  type: ovs-bridge
+  state: up
+  ipv4:
+    enabled: false
+    dhcp: false
+  ipv6:
+    enabled: false
+    dhcp: false
+  bridge:
+    options:
+      mcast-snooping-enable: true
+    port:
+    - name: {{ .InterfaceName }}
+    - name: br-ex
+- name: br-ex
+  type: ovs-interface
+  state: up
+  copy-mac-from: {{ .InterfaceName }}
+  ipv4:
+    enabled: {{ .IPv4.Enabled }}
+    dhcp: {{ .IPv4.DHCPEnabled }}{{ if .IPv4.Enabled }}
+    address:
+    - ip: {{ .IPv4.Address }}
+      prefix-length: {{ .IPv4.PrefixLen }}
+    auto-route-metric: 48{{ end }}
+  ipv6:
+    enabled: {{ .IPv6.Enabled }}
+    dhcp: {{ .IPv6.DHCPEnabled }}{{ if .IPv6.Enabled }}
+    address:
+    - ip: {{ .IPv6.Address }}
+      prefix-length: {{ .IPv6.PrefixLen }}
+    auto-route-metric: 48{{ end }}

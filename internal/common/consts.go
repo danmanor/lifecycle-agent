@@ -131,6 +131,8 @@ const (
 	IBIWorkspace = "var/tmp"
 
 	ContainerStoragePath = "/var/lib/containers"
+
+	DnsmasqOverrides = "/etc/default/sno_dnsmasq_configuration_overrides"
 )
 
 // Annotation names and values related to extra manifest

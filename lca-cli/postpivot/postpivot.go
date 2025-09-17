@@ -70,7 +70,7 @@ func NewPostPivot(scheme *runtime.Scheme, log *logrus.Logger, ops ops.Ops, authF
 }
 
 var (
-	dnsmasqOverrides   = "/etc/default/sno_dnsmasq_configuration_overrides"
+	dnsmasqOverrides   = common.DnsmasqOverrides
 	nmConnectionFolder = common.NMConnectionFolder
 	nodePrimaryIPFile  = "/run/nodeip-configuration/primary-ip"
 	nodeIPHintFile     = "/etc/default/nodeip-configuration"

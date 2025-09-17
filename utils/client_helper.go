@@ -461,3 +461,22 @@ func getClusterNetworks(ctx context.Context, client runtimeclient.Client) ([]str
 
 	return clusterNetworks, network.Status.ServiceNetwork, nil
 }
+
+func GetInstallConfig(ctx context.Context, client runtimeclient.Client) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("runtime client not available")
+	}
+
+	configMap := &corev1.ConfigMap{}
+	err := client.Get(ctx, runtimeclient.ObjectKey{Name: "cluster-config-v1", Namespace: "kube-system"}, configMap)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch cluster-config-v1 ConfigMap: %w", err)
+	}
+
+	installConfig, exists := configMap.Data["install-config"]
+	if !exists {
+		return "", fmt.Errorf("install-config not found in cluster-config-v1 ConfigMap")
+	}
+
+	return installConfig, nil
+}

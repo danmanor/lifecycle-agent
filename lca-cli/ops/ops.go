@@ -2,6 +2,7 @@ package ops
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,9 +16,11 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/recert"
+
 	"github.com/openshift-kni/lifecycle-agent/utils"
 	"github.com/openshift/assisted-image-service/pkg/isoeditor"
 )
@@ -41,6 +44,7 @@ type Ops interface {
 	ForceExpireSeedCrypto(recertContainerImage, authFile string, hasKubeAdminPassword bool) error
 	RestoreOriginalSeedCrypto(recertContainerImage, authFile string) error
 	RunUnauthenticatedEtcdServer(authFile, name string) error
+	StopEtcdServer(authfile, name string) error
 	waitForEtcd(healthzEndpoint string) error
 	RunRecert(recertContainerImage, authFile, recertConfigFile string, additionalPodmanParams ...string) error
 	ExtractTarWithSELinux(srcPath, destPath string) error
@@ -60,6 +64,9 @@ type Ops interface {
 	GetHostname() (string, error)
 	CreateIsoWithEmbeddedIgnition(log logrus.FieldLogger, ignitionBytes []byte, baseIsoPath, outputIsoPath string) error
 	GetContainerStorageTarget() (string, error)
+	StopClusterServices() error
+	EnableClusterServices() error
+	EnsureNMStateConfigurationServiceEnabled() error
 }
 
 type CMD struct {
@@ -196,6 +203,14 @@ func (o *ops) RunUnauthenticatedEtcdServer(authFile, name string) error {
 	}
 	o.log.Info("Unauthenticated etcd server for recert is up and running")
 
+	return nil
+}
+
+func (o *ops) StopEtcdServer(authfile, name string) error {
+	o.log.Info("Stopping the unauthenticated etcd server")
+	if _, err := o.RunInHostNamespace(podman, "stop", common.EtcdContainerName); err != nil {
+		o.log.WithError(err).Errorf("failed to stop %s container.", common.EtcdContainerName)
+	}
 	return nil
 }
 
@@ -403,12 +418,7 @@ func (o *ops) RecertFullFlow(recertContainerImage, authFile, configFile string,
 		return fmt.Errorf("failed to run etcd, err: %w", err)
 	}
 
-	defer func() {
-		o.log.Info("Killing the unauthenticated etcd server")
-		if _, err := o.RunInHostNamespace(podman, "stop", common.EtcdContainerName); err != nil {
-			o.log.WithError(err).Errorf("failed to kill %s container.", common.EtcdContainerName)
-		}
-	}()
+	defer o.StopEtcdServer(authFile, common.EtcdContainerName)
 
 	if preRecertOperations != nil {
 		if err := preRecertOperations(); err != nil {
@@ -612,4 +622,70 @@ func (o *ops) GetContainerStorageTarget() (string, error) {
 
 	}
 	return "", fmt.Errorf("failed to find mountpoint target in %s", containerStorageMountUnit)
+}
+
+// StopClusterServices stops kubelet and crio services with proper container cleanup
+func (o *ops) StopClusterServices() error {
+	o.log.Info("Stop kubelet service")
+	_, err := o.SystemctlAction("stop", "kubelet.service")
+	if err != nil {
+		return fmt.Errorf("failed to stop kubelet: %w", err)
+	}
+
+	o.log.Info("Disabling kubelet service")
+	_, err = o.SystemctlAction("disable", "kubelet.service")
+	if err != nil {
+		return fmt.Errorf("failed to disable kubelet: %w", err)
+	}
+
+	o.log.Info("Stopping containers and CRI-O runtime.")
+	crioSystemdStatus, err := o.SystemctlAction("is-active", "crio")
+	var exitErr *exec.ExitError
+	// If ExitCode is 3, the command succeeded and told us that crio is down
+	if err != nil && errors.As(err, &exitErr) && exitErr.ExitCode() != 3 {
+		return fmt.Errorf("failed to checking crio status: %w", err)
+	}
+	o.log.Info("crio status is ", crioSystemdStatus)
+	if crioSystemdStatus == "active" {
+		// CRI-O is active, so stop running containers with retry
+		_ = wait.PollUntilContextCancel(context.TODO(), time.Second, true, func(ctx context.Context) (done bool, err error) {
+			o.log.Info("Stop running containers")
+			args := []string{"ps", "-q", "|", "xargs", "--no-run-if-empty", "--max-args", "1", "--max-procs", "10", "crictl", "stop", "--timeout", "5"}
+			_, err = o.RunBashInHostNamespace("crictl", args...)
+			if err != nil {
+				return false, fmt.Errorf("failed to stop running containers: %w", err)
+			}
+			return true, nil
+		})
+
+		// Execute a D-Bus call to stop the CRI-O runtime
+		o.log.Debug("Stopping CRI-O engine")
+		_, err = o.SystemctlAction("stop", "crio.service")
+		if err != nil {
+			return fmt.Errorf("failed to stop crio engine: %w", err)
+		}
+		o.log.Info("Running containers and CRI-O engine stopped successfully.")
+	} else {
+		o.log.Info("Skipping running containers and CRI-O engine already stopped.")
+	}
+
+	return nil
+}
+
+func (o *ops) EnableClusterServices() error {
+	o.log.Info("Enabling kubelet service")
+	_, err := o.SystemctlAction("enable", "kubelet.service")
+	if err != nil {
+		return fmt.Errorf("failed to enable kubelet: %w", err)
+	}
+	return nil
+}
+
+func (o *ops) EnsureNMStateConfigurationServiceEnabled() error {
+	o.log.Info("Ensuring NMState configuration service is enabled")
+	_, err := o.SystemctlAction("enable", "nmstate-configuration.service")
+	if err != nil {
+		return fmt.Errorf("failed to enable nmstate-configuration: %w", err)
+	}
+	return nil
 }

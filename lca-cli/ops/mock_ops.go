@@ -81,6 +81,34 @@ func (mr *MockOpsMockRecorder) CreateIsoWithEmbeddedIgnition(log, ignitionBytes,
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateIsoWithEmbeddedIgnition", reflect.TypeOf((*MockOps)(nil).CreateIsoWithEmbeddedIgnition), log, ignitionBytes, baseIsoPath, outputIsoPath)
 }
 
+// EnableClusterServices mocks base method.
+func (m *MockOps) EnableClusterServices() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EnableClusterServices")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// EnableClusterServices indicates an expected call of EnableClusterServices.
+func (mr *MockOpsMockRecorder) EnableClusterServices() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableClusterServices", reflect.TypeOf((*MockOps)(nil).EnableClusterServices))
+}
+
+// EnsureNMStateConfigurationServiceEnabled mocks base method.
+func (m *MockOps) EnsureNMStateConfigurationServiceEnabled() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EnsureNMStateConfigurationServiceEnabled")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// EnsureNMStateConfigurationServiceEnabled indicates an expected call of EnsureNMStateConfigurationServiceEnabled.
+func (mr *MockOpsMockRecorder) EnsureNMStateConfigurationServiceEnabled() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureNMStateConfigurationServiceEnabled", reflect.TypeOf((*MockOps)(nil).EnsureNMStateConfigurationServiceEnabled))
+}
+
 // ExtractTarWithSELinux mocks base method.
 func (m *MockOps) ExtractTarWithSELinux(srcPath, destPath string) error {
 	m.ctrl.T.Helper()
@@ -359,6 +387,34 @@ func (m *MockOps) SetupContainersFolderCommands() error {
 func (mr *MockOpsMockRecorder) SetupContainersFolderCommands() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetupContainersFolderCommands", reflect.TypeOf((*MockOps)(nil).SetupContainersFolderCommands))
+}
+
+// StopClusterServices mocks base method.
+func (m *MockOps) StopClusterServices() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StopClusterServices")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// StopClusterServices indicates an expected call of StopClusterServices.
+func (mr *MockOpsMockRecorder) StopClusterServices() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StopClusterServices", reflect.TypeOf((*MockOps)(nil).StopClusterServices))
+}
+
+// StopEtcdServer mocks base method.
+func (m *MockOps) StopEtcdServer(authfile, name string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StopEtcdServer", authfile, name)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// StopEtcdServer indicates an expected call of StopEtcdServer.
+func (mr *MockOpsMockRecorder) StopEtcdServer(authfile, name any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StopEtcdServer", reflect.TypeOf((*MockOps)(nil).StopEtcdServer), authfile, name)
 }
 
 // SystemctlAction mocks base method.
