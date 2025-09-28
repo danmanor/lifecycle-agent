@@ -47,6 +47,7 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	seedgenv1 "github.com/openshift-kni/lifecycle-agent/api/seedgenerator/v1"
 	configv1 "github.com/openshift/api/config/v1"
 	ocpV1 "github.com/openshift/api/config/v1"
@@ -100,6 +101,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(ibuv1.AddToScheme(scheme))
 	utilruntime.Must(seedgenv1.AddToScheme(scheme))
+	utilruntime.Must(ipcv1.AddToScheme(scheme))
 	utilruntime.Must(ocpV1.AddToScheme(scheme))
 	utilruntime.Must(mcv1.AddToScheme(scheme))
 	utilruntime.Must(velerov1.AddToScheme(scheme))
@@ -304,6 +306,18 @@ func main() {
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
+
+	if err = (&controllers.IPConfigReconciler{
+		Client:          mgr.GetClient(),
+		NoncachedClient: mgr.GetAPIReader(),
+		Scheme:          mgr.GetScheme(),
+		Executor:        executor,
+		Ops:             op,
+		Mux:             mux,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "IPConfig")
+		os.Exit(1)
+	}
 
 	seedgenLog := ctrl.Log.WithName("controllers").WithName("SeedGenerator")
 	if err = (&controllers.SeedGeneratorReconciler{

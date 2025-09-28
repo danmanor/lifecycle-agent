@@ -50,6 +50,8 @@ func NewPrepareHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClient
 }
 
 func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) error {
+	p.log.Infof("IP config prepare started with IPv4: %s and IPv6: %s", newIPv4, newIPv6)
+
 	newStateroot, err := p.buildStaterootName(newIPv4, newIPv6)
 	if err != nil {
 		return err
@@ -81,7 +83,9 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		return err
 	}
 
-	return p.reboot.RebootToNewStateRoot("ip-config prepare")
+	p.log.Info("IP config prepare done successfully")
+
+	return nil
 }
 
 func (p *PrepareHandler) buildStaterootName(newIPv4, newIPv6 string) (string, error) {

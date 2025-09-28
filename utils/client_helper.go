@@ -480,3 +480,17 @@ func GetInstallConfig(ctx context.Context, client runtimeclient.Client) (string,
 
 	return installConfig, nil
 }
+
+// getLocalNodeName returns the current node's name from the hostname.
+func GetLocalNodeName(ctx context.Context, client runtimeclient.Client) (string, error) {
+	nodeList := &corev1.NodeList{}
+	if err := client.List(ctx, nodeList); err != nil {
+		return "", fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	if len(nodeList.Items) != 1 {
+		return "", fmt.Errorf("expected exactly one node, got %d", len(nodeList.Items))
+	}
+
+	return nodeList.Items[0].Name, nil
+}

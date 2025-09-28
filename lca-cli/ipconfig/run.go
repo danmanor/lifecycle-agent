@@ -508,7 +508,7 @@ func (i *IPConfigHandler) waitForMCPMasterUpdated(ctx context.Context) error {
 
 // waitForNodeToApplyRenderedMC waits for the single node to have desired/current annotations equal to MCP rendered.
 func (i *IPConfigHandler) waitForNodeToApplyRenderedMC(ctx context.Context) error {
-	nodeName, err := i.getLocalNodeName(ctx)
+	nodeName, err := utils.GetLocalNodeName(ctx, i.runtimeClient)
 	if err != nil {
 		return err
 	}
@@ -551,17 +551,6 @@ func (i *IPConfigHandler) waitForNodeToApplyRenderedMC(ctx context.Context) erro
 		}
 		return false, nil
 	})
-}
-
-// getLocalNodeName returns the current node's name from the hostname.
-func (i *IPConfigHandler) getLocalNodeName(ctx context.Context) (string, error) {
-	nodeList := &corev1.NodeList{}
-	if err := i.runtimeClient.List(ctx, nodeList); err == nil && len(nodeList.Items) == 1 {
-		i.log.Infof("Found node: %s", nodeList.Items[0].Name)
-		return nodeList.Items[0].Name, nil
-	}
-
-	return "", fmt.Errorf("failed to determine node name")
 }
 
 // mcpConditionStatus returns the Status string for a given MCP condition type if present, otherwise empty string.
