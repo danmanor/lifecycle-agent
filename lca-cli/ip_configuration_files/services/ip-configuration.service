@@ -1,0 +1,15 @@
+[Unit]
+Description=LCA IP configuration run service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/lca-cli ip-config run
+
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+
+

@@ -241,6 +241,20 @@ func (mr *MockOpsMockRecorder) MountImage(img any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MountImage", reflect.TypeOf((*MockOps)(nil).MountImage), img)
 }
 
+// Reboot mocks base method.
+func (m *MockOps) Reboot() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Reboot")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Reboot indicates an expected call of Reboot.
+func (mr *MockOpsMockRecorder) Reboot() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reboot", reflect.TypeOf((*MockOps)(nil).Reboot))
+}
+
 // RecertFullFlow mocks base method.
 func (m *MockOps) RecertFullFlow(recertContainerImage, authFile, configFile string, preRecertOperations, postRecertOperations func() error, additionalPodmanParams ...string) error {
 	m.ctrl.T.Helper()

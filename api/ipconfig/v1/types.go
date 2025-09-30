@@ -109,17 +109,12 @@ type IPConfigSpec struct {
 
 	// Recert image for certificate rotation during configure stage
 	RecertImage string `json:"recertImage,omitempty"`
+
+	// RebootAutomatically, when true, will reboot the node on the same stateroot
+	// after a successful lca-cli ip-config run. Defaults to false.
+	// +kubebuilder:default=false
+	RebootAutomatically bool `json:"rebootAutomatically,omitempty"`
 }
-
-// Condition types for IPConfig
-const (
-	ConditionPrepared   = "Prepared"
-	ConditionConfigured = "Configured"
-	ConditionDegraded   = "Degraded"
-)
-
-// ConditionReason is a string representing the reason field
-type ConditionReason string
 
 // IPConfigStatus defines the observed state of IPConfig
 type IPConfigStatus struct {
@@ -129,11 +124,8 @@ type IPConfigStatus struct {
 	// ValidNextStages enumerates allowed next transitions from current stage
 	ValidNextStages []IPConfigStage `json:"validNextStages,omitempty"`
 
-	// CurrentHostNetwork reflects the host's current network view
-	CurrentHostNetwork *HostNetworkStatus `json:"currentHostNetwork,omitempty"`
-
-	// CurrentClusterIPs reflects the node internal IPs known to the cluster
-	CurrentClusterIPs *ClusterIPsStatus `json:"currentClusterIPs,omitempty"`
+	// ClusterIPs reflects the node internal IPs known to the cluster
+	ClusterIPs *ClusterIPsStatus `json:"clusterIPs,omitempty"`
 }
 
 // HostNetworkStatus summarizes current host network

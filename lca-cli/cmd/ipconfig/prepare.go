@@ -77,7 +77,7 @@ func runIPConfigPrepare() error {
 	}
 	opsInterface := ops.NewOps(pkgLog, hostCommandsExecutor)
 
-	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.KubeconfigFile)
+	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.PathOutsideChroot(common.KubeconfigFile))
 	if err != nil {
 		return fmt.Errorf("failed to create k8s config: %w", err)
 	}

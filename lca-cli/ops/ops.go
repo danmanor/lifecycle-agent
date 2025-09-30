@@ -67,6 +67,7 @@ type Ops interface {
 	StopClusterServices() error
 	EnableClusterServices() error
 	EnsureNMStateConfigurationServiceEnabled() error
+	Reboot() error
 }
 
 type CMD struct {
@@ -686,6 +687,15 @@ func (o *ops) EnsureNMStateConfigurationServiceEnabled() error {
 	_, err := o.SystemctlAction("enable", "nmstate-configuration.service")
 	if err != nil {
 		return fmt.Errorf("failed to enable nmstate-configuration: %w", err)
+	}
+	return nil
+}
+
+func (o *ops) Reboot() error {
+	o.log.Info("Rebooting the system")
+	_, err := o.SystemctlAction("reboot")
+	if err != nil {
+		return fmt.Errorf("failed to reboot: %w", err)
 	}
 	return nil
 }

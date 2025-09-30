@@ -8,6 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ibuv1 "github.com/openshift-kni/lifecycle-agent/api/imagebasedupgrade/v1"
+	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -16,25 +17,37 @@ type ConditionType string
 
 // ConditionTypes define the different types of conditions that will be set
 var ConditionTypes = struct {
-	Idle               ConditionType
-	PrepInProgress     ConditionType
-	PrepCompleted      ConditionType
-	UpgradeInProgress  ConditionType
-	UpgradeCompleted   ConditionType
-	RollbackInProgress ConditionType
-	RollbackCompleted  ConditionType
-	SeedGenInProgress  ConditionType
-	SeedGenCompleted   ConditionType
+	Idle                  ConditionType
+	PrepInProgress        ConditionType
+	PrepCompleted         ConditionType
+	UpgradeInProgress     ConditionType
+	UpgradeCompleted      ConditionType
+	RollbackInProgress    ConditionType
+	RollbackCompleted     ConditionType
+	SeedGenInProgress     ConditionType
+	SeedGenCompleted      ConditionType
+	IPPrepareInProgress   ConditionType
+	IPPrepareCompleted    ConditionType
+	IPConfigureInProgress ConditionType
+	IPConfigureCompleted  ConditionType
+	IPRollbackInProgress  ConditionType
+	IPRollbackCompleted   ConditionType
 }{
-	Idle:               "Idle",
-	PrepInProgress:     "PrepInProgress",
-	PrepCompleted:      "PrepCompleted",
-	UpgradeInProgress:  "UpgradeInProgress",
-	UpgradeCompleted:   "UpgradeCompleted",
-	RollbackInProgress: "RollbackInProgress",
-	RollbackCompleted:  "RollbackCompleted",
-	SeedGenInProgress:  "SeedGenInProgress",
-	SeedGenCompleted:   "SeedGenCompleted",
+	Idle:                  "Idle",
+	PrepInProgress:        "PrepInProgress",
+	PrepCompleted:         "PrepCompleted",
+	UpgradeInProgress:     "UpgradeInProgress",
+	UpgradeCompleted:      "UpgradeCompleted",
+	RollbackInProgress:    "RollbackInProgress",
+	RollbackCompleted:     "RollbackCompleted",
+	SeedGenInProgress:     "SeedGenInProgress",
+	SeedGenCompleted:      "SeedGenCompleted",
+	IPPrepareInProgress:   "IPPrepareInProgress",
+	IPPrepareCompleted:    "IPPrepareCompleted",
+	IPConfigureInProgress: "IPConfigureInProgress",
+	IPConfigureCompleted:  "IPConfigureCompleted",
+	IPRollbackInProgress:  "IPRollbackInProgress",
+	IPRollbackCompleted:   "IPRollbackCompleted",
 }
 
 var SeedGenConditionTypes = struct {
@@ -273,6 +286,50 @@ func GetCompletedConditionType(stage ibuv1.ImageBasedUpgradeStage) (conditionTyp
 		conditionType = ConditionTypes.RollbackCompleted
 	}
 	return
+}
+
+// GetIPInProgressConditionType returns the IPConfig in-progress condition type based on the stage (Idle excluded)
+func GetIPInProgressConditionType(stage ipcv1.IPConfigStage) (conditionType ConditionType) {
+	switch stage {
+	case ipcv1.IPStages.Prepare:
+		conditionType = ConditionTypes.IPPrepareInProgress
+	case ipcv1.IPStages.Configure:
+		conditionType = ConditionTypes.IPConfigureInProgress
+	case ipcv1.IPStages.Rollback:
+		conditionType = ConditionTypes.IPRollbackInProgress
+	}
+	return
+}
+
+// GetIPCompletedConditionType returns the IPConfig completed condition type based on the stage (Idle excluded)
+func GetIPCompletedConditionType(stage ipcv1.IPConfigStage) (conditionType ConditionType) {
+	switch stage {
+	case ipcv1.IPStages.Prepare:
+		conditionType = ConditionTypes.IPPrepareCompleted
+	case ipcv1.IPStages.Configure:
+		conditionType = ConditionTypes.IPConfigureCompleted
+	case ipcv1.IPStages.Rollback:
+		conditionType = ConditionTypes.IPRollbackCompleted
+	}
+	return
+}
+
+// GetIPInProgressCondition returns the in-progress condition for the given IPConfig stage
+func GetIPInProgressCondition(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) *metav1.Condition {
+	conditionType := GetIPInProgressConditionType(stage)
+	if conditionType != "" {
+		return meta.FindStatusCondition(ipc.Status.Conditions, string(conditionType))
+	}
+	return nil
+}
+
+// GetIPCompletedCondition returns the completed condition for the given IPConfig stage
+func GetIPCompletedCondition(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) *metav1.Condition {
+	conditionType := GetIPCompletedConditionType(stage)
+	if conditionType != "" {
+		return meta.FindStatusCondition(ipc.Status.Conditions, string(conditionType))
+	}
+	return nil
 }
 
 // SetStatusInvalidTransition updates the given stage status to invalid transition with message

@@ -63,6 +63,7 @@ COPY --from=builder \
     /usr/local/bin/
 
 COPY lca-cli/installation_configuration_files/ /usr/local/installation_configuration_files/
+COPY lca-cli/ip_configuration_files/ /usr/local/ip_configuration_files/
 
 COPY --from=openshift-cli /usr/bin/oc /usr/bin/oc
 

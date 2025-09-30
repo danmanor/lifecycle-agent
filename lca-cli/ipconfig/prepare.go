@@ -1,19 +1,3 @@
-/*
-Copyright 2023.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package ipconfig
 
 import (
@@ -134,9 +118,17 @@ func (p *PrepareHandler) getCurrentStaterootAndBootedCommit() (string, string, e
 }
 
 func (p *PrepareHandler) deployNewStateroot(newStateroot, bootedCommit string, kargs []string) error {
-	if err := p.ostree.OSInit(newStateroot); err != nil {
-		return fmt.Errorf("failed ostree admin os-init: %w", err)
+	if existing, _ := p.ostree.GetDeployment(newStateroot); existing != "" {
+		if strings.HasPrefix(existing, bootedCommit) {
+			p.log.Infof("stateroot %s already deployed with commit %s, skipping deploy", newStateroot, bootedCommit)
+			return nil
+		}
 	}
+
+	if err := p.ostree.OSInit(newStateroot); err != nil {
+		p.log.Warnf("os-init for %s returned error, assuming already initialized: %v", newStateroot, err)
+	}
+
 	if err := p.ostree.Deploy(newStateroot, bootedCommit, kargs, p.rpm, false); err != nil {
 		return fmt.Errorf("failed ostree admin deploy: %w", err)
 	}
@@ -151,15 +143,42 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot, boote
 	oldCommitDir := filepath.Join(oldSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit))
 	newCommitDir := filepath.Join(newSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit))
 
-	if _, err := p.ops.RunInHostNamespace("cp", "-r", "-a", "--preserve=context", filepath.Join("/", oldVar)+"/", filepath.Join("/", newVarParent)+"/"); err != nil {
+	_ = os.MkdirAll(newCommitDir, 0o755)
+	_ = os.MkdirAll(newCommitDir, 0o755)
+
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -ar --preserve=context '%s/' '%s/'",
+			oldVar,
+			newVarParent,
+		),
+	); err != nil {
 		return fmt.Errorf("failed to copy var: %w", err)
 	}
-	if _, err := p.ops.RunInHostNamespace("cp", "-r", "-a", "--preserve=context", filepath.Join("/", oldCommitDir, "etc")+"/", filepath.Join("/", newCommitDir)+"/"); err != nil {
+
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -ar --preserve=context '%s/' '%s/'",
+			filepath.Join(oldCommitDir, "etc"),
+			newCommitDir,
+		),
+	); err != nil {
 		return fmt.Errorf("failed to copy etc: %w", err)
 	}
-	if _, err := p.ops.RunInHostNamespace("cp", "-a", "--preserve=context", filepath.Join("/", oldCommitDir)+".origin", filepath.Join("/", newCommitDir)+".origin"); err != nil {
+
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -a --preserve=context '%s' '%s'",
+			fmt.Sprintf("%s.%s", filepath.Join(oldSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit)), "origin"),
+			fmt.Sprintf("%s.%s", filepath.Join(newSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit)), "origin"),
+		),
+	); err != nil {
 		return fmt.Errorf("failed to copy origin file: %w", err)
 	}
+
 	return nil
 }
 
@@ -184,7 +203,7 @@ func fetchCurrentKernelArgs() ([]string, error) {
 		err  error
 	)
 
-	if data, err = os.ReadFile(common.MCDCurrentConfig); err != nil || data == nil {
+	if data, err = os.ReadFile(common.PathOutsideChroot(common.MCDCurrentConfig)); err != nil || data == nil {
 		return nil, fmt.Errorf("failed to read MCD currentconfig: %w", err)
 	}
 

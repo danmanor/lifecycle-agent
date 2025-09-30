@@ -234,6 +234,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := lcautils.InitIPConfig(context.TODO(), mgr.GetClient(), &setupLog); err != nil {
+		setupLog.Error(err, "unable to initialize IPConfig CR")
+		os.Exit(1)
+	}
+
 	dynamicClient, err := lcautils.CreateDynamicClient(common.PathOutsideChroot(common.KubeconfigFile), true, log.WithName("ibu-dynamic-client"))
 	if err != nil {
 		setupLog.Error(err, "unable to create dynamic client")
@@ -313,7 +318,27 @@ func main() {
 		Scheme:          mgr.GetScheme(),
 		Executor:        executor,
 		Ops:             op,
+		RebootClient:    rebootClient,
+		OstreeClient:    ostreeClient,
+		RPMOstreeClient: rpmOstreeClient,
 		Mux:             mux,
+		ConfigureHandler: controllers.NewConfigureHandler(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			executor,
+			op,
+			rebootClient,
+			log,
+		),
+		RollbackHandler: controllers.NewRollbackHandler(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			rpmOstreeClient,
+			executor,
+			op,
+			rebootClient,
+			log,
+		),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPConfig")
 		os.Exit(1)

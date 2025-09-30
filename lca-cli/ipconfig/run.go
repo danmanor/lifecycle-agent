@@ -1,19 +1,3 @@
-/*
-Copyright 2023.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package ipconfig
 
 import (
@@ -48,15 +32,16 @@ type NetworkIPConfig struct {
 
 // IPConfig handles the IP change process
 type IPConfigHandler struct {
-	log            *logrus.Logger
-	ops            ops.Ops
-	executor       ops.Execute
-	recertImage    string
-	workingDir     string
-	IPConfigs      []*NetworkIPConfig
-	runtimeClient  runtimeclient.Client
-	Proxy          *ProxyConfig
-	PullSecretFile string
+	log             *logrus.Logger
+	ops             ops.Ops
+	executor        ops.Execute
+	recertImage     string
+	workingDir      string
+	IPConfigs       []*NetworkIPConfig
+	runtimeClient   runtimeclient.Client
+	Proxy           *ProxyConfig
+	PullSecretFile  string
+	DisabledService string
 }
 
 // NewIPConfig creates a new IPConfig instance
@@ -90,7 +75,7 @@ type ProxyConfig struct {
 	NoProxy    string
 }
 
-func (i *IPConfigHandler) RunIPConfigChange() error {
+func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPCOnfigService bool) error {
 	i.log.Infof("Starting IP config process")
 	for _, ipConfig := range i.IPConfigs {
 		i.log.Infof("Changing IP to %s, machine network to %s", ipConfig.IP, ipConfig.MachineNetwork)
@@ -158,6 +143,19 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 
 	if err := i.removeOvnCertsFolders(); err != nil {
 		return err
+	}
+
+	if rebootAutomatically {
+		if err := i.ops.Reboot(); err != nil {
+			return err
+		}
+	}
+
+	if disableIPCOnfigService {
+		i.log.Infof("Disabling systemd service: %s", common.IPConfigService)
+		if _, err := i.ops.SystemctlAction("disable", common.IPConfigService); err != nil {
+			return fmt.Errorf("failed to disable service %s: %w", common.IPConfigService, err)
+		}
 	}
 
 	i.log.Info("Finished IP config process")
@@ -283,7 +281,7 @@ func (i *IPConfigHandler) ensureNodeIPRerunService(newMachineNetwork string) err
 		return fmt.Errorf("failed to generate nodeip rerun service content: %w", err)
 	}
 
-	if err := os.WriteFile(utils.NodeipRerunUnitPath, []byte(unitContent), 0644); err != nil {
+	if err := os.WriteFile(common.PathOutsideChroot(utils.NodeipRerunUnitPath), []byte(unitContent), 0644); err != nil {
 		return fmt.Errorf("failed to write nodeip rerun service file: %w", err)
 	}
 
@@ -307,7 +305,7 @@ func (i *IPConfigHandler) configureDNSMasqOverride() error {
 		fmt.Sprintf("SNO_DNSMASQ_IP_OVERRIDE=%s", primaryIP),
 	}
 
-	if err := os.WriteFile(common.DnsmasqOverrides, []byte(strings.Join(config, "\n")), 0o600); err != nil {
+	if err := os.WriteFile(common.PathOutsideChroot(common.DnsmasqOverrides), []byte(strings.Join(config, "\n")), 0o600); err != nil {
 		return fmt.Errorf("failed to set dnsmasq overrides, err %w", err)
 	}
 
@@ -320,9 +318,9 @@ func (i *IPConfigHandler) cleanupNMStateAppliedFiles() error {
 	i.log.Info("Cleaning up nmstate residual state files")
 
 	filesToRemove := []string{
-		"/etc/nmstate/openshift/applied",
-		"/etc/nmstate/cluster.yml",
-		"/etc/nmstate/cluster.applied",
+		common.PathOutsideChroot("/etc/nmstate/openshift/applied"),
+		common.PathOutsideChroot("/etc/nmstate/cluster.yml"),
+		common.PathOutsideChroot("/etc/nmstate/cluster.applied"),
 	}
 
 	for _, file := range filesToRemove {
@@ -406,6 +404,12 @@ func (i *IPConfigHandler) applyNetworkConfigurationMachineConfig(ctx context.Con
 	if err := i.runtimeClient.Create(ctx, mc); err != nil {
 		existingMC := &machineconfigv1.MachineConfig{}
 		if getErr := i.runtimeClient.Get(ctx, types.NamespacedName{Name: mc.Name}, existingMC); getErr == nil {
+			// If spec is identical, treat as idempotent and skip update
+			if string(existingMC.Spec.Config.Raw) == string(mc.Spec.Config.Raw) {
+				i.log.Infof("Machine config %s already up to date; skipping update", mc.Name)
+				return nil
+			}
+
 			mc.ResourceVersion = existingMC.ResourceVersion
 			if updateErr := i.runtimeClient.Update(ctx, mc); updateErr != nil {
 				return fmt.Errorf("failed to update existing machine config: %w", updateErr)

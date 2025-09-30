@@ -199,13 +199,8 @@ func (in *IPConfigStatus) DeepCopyInto(out *IPConfigStatus) {
 		*out = make([]IPConfigStage, len(*in))
 		copy(*out, *in)
 	}
-	if in.CurrentHostNetwork != nil {
-		in, out := &in.CurrentHostNetwork, &out.CurrentHostNetwork
-		*out = new(HostNetworkStatus)
-		(*in).DeepCopyInto(*out)
-	}
-	if in.CurrentClusterIPs != nil {
-		in, out := &in.CurrentClusterIPs, &out.CurrentClusterIPs
+	if in.ClusterIPs != nil {
+		in, out := &in.ClusterIPs, &out.ClusterIPs
 		*out = new(ClusterIPsStatus)
 		(*in).DeepCopyInto(*out)
 	}

@@ -55,6 +55,7 @@ const (
 	MCDCurrentConfig = "/etc/machine-config-daemon/currentconfig"
 
 	InstallationConfigurationFilesDir = "/usr/local/installation_configuration_files"
+	IPConfigurationFilesDir           = "/usr/local/ip_configuration_files"
 	OptOpenshift                      = "/opt/openshift"
 	SeedDataDir                       = "/var/seed_data"
 	KubeconfigCryptoDir               = "kubeconfig-crypto"
@@ -70,6 +71,7 @@ const (
 	CABundleFilePath                  = "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
 
 	LCAConfigDir                                    = "/var/lib/lca"
+	IPConfigRunFlagsFile                            = LCAConfigDir + "/ip-config-run.json"
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800
 	IBUInitMonitorService                           = "lca-init-monitor.service"
@@ -133,6 +135,9 @@ const (
 	ContainerStoragePath = "/var/lib/containers"
 
 	DnsmasqOverrides = "/etc/default/sno_dnsmasq_configuration_overrides"
+
+	IPConfigService = "ip-configuration.service"
+	IPConfigName    = "ipconfig"
 )
 
 // Annotation names and values related to extra manifest

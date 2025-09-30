@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-logr/logr"
 	ibuv1 "github.com/openshift-kni/lifecycle-agent/api/imagebasedupgrade/v1"
+	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	"github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	cp "github.com/otiai10/copy"
@@ -319,6 +320,25 @@ func InitIBU(ctx context.Context, c client.Client, log *logr.Logger) error {
 		return fmt.Errorf("failed to remove IBU in %s: %w", filePath, err)
 	}
 	log.Info("Restore successful and saved IBU CR removed")
+	return nil
+}
+
+func InitIPConfig(ctx context.Context, c client.Client, log *logr.Logger) error {
+	ipc := &ipcv1.IPConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: common.IPConfigName},
+		Spec:       ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Idle},
+	}
+
+	if err := c.Create(ctx, ipc); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			log.Info("IPConfig already exists")
+			return nil
+		}
+		return fmt.Errorf("failed to create IPConfig during init: %w", err)
+	}
+
+	log.Info("Initial IPConfig created")
+
 	return nil
 }
 

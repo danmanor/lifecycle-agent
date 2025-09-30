@@ -17,6 +17,7 @@ limitations under the License.
 package ipconfigcmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -38,14 +39,16 @@ var (
 	ipConfigScheme = runtime.NewScheme()
 
 	// IP configuration parameters
-	ipv4Address        string
-	ipv4MachineNetwork string
-	ipv6Address        string
-	ipv6MachineNetwork string
-	httpProxy          string
-	httpsProxy         string
-	noProxy            string
-	pullSecretFile     string
+	ipv4Address            string
+	ipv4MachineNetwork     string
+	ipv6Address            string
+	ipv6MachineNetwork     string
+	httpProxy              string
+	httpsProxy             string
+	noProxy                string
+	pullSecretFile         string
+	disableIPConfigService bool
+	rebootAutomatically    bool
 )
 
 const (
@@ -68,6 +71,8 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretFile, "pull-secret-file", "", "Path to pull secret auth file to use for image pulls")
+	ipConfigRunCmd.Flags().BoolVar(&disableIPConfigService, "disable-ip-config-service", false, "Disable ip-configuration.service at the end of ip-config run")
+	ipConfigRunCmd.Flags().BoolVar(&rebootAutomatically, "reboot-automatically", false, "Reboot after successful IP reconfiguration")
 }
 
 var ipConfigRunCmd = &cobra.Command{
@@ -81,6 +86,26 @@ var ipConfigRunCmd = &cobra.Command{
 }
 
 func runIPConfigChange() error {
+	if data, err := os.ReadFile(common.IPConfigRunFlagsFile); err == nil && len(data) > 0 {
+		var cfg common.IPConfigRunConfig
+		if jsonErr := json.Unmarshal(data, &cfg); jsonErr == nil {
+			ipv4Address = cfg.IPv4Address
+			ipv4MachineNetwork = cfg.IPv4MachineNetwork
+			ipv6Address = cfg.IPv6Address
+			ipv6MachineNetwork = cfg.IPv6MachineNetwork
+			httpProxy = cfg.HTTPProxy
+			httpsProxy = cfg.HTTPSProxy
+			noProxy = cfg.NoProxy
+			pullSecretFile = cfg.PullSecretFile
+			disableIPConfigService = cfg.DisableIPConfigService
+			rebootAutomatically = cfg.RebootAutomatically
+		} else {
+			pkgLog.Warnf("failed to unmarshal ip-config run config: %v", jsonErr)
+		}
+	} else {
+		pkgLog.Info("using command line flags")
+	}
+
 	if err := validateIPConfigArgs(ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork); err != nil {
 		return err
 	}
@@ -101,7 +126,7 @@ func runIPConfigChange() error {
 
 	opsInterface := ops.NewOps(pkgLog, hostCommandsExecutor)
 
-	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.KubeconfigFile)
+	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.PathOutsideChroot(common.KubeconfigFile))
 	if err != nil {
 		return fmt.Errorf("failed to create k8s config: %w", err)
 	}
@@ -117,17 +142,16 @@ func runIPConfigChange() error {
 		hostCommandsExecutor,
 		client,
 		pkgRecertImage,
-		common.OptOpenshift,
+		common.PathOutsideChroot(common.OptOpenshift),
 		ipConfigs,
 		&ipconfig.ProxyConfig{HTTPProxy: httpProxy, HTTPSProxy: httpsProxy, NoProxy: noProxy},
 		pullSecretFile,
 	)
 
-	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
+	if err = ipConfigHandler.RunIPConfigChange(rebootAutomatically, disableIPConfigService); err != nil {
 		return fmt.Errorf("failed to run IP config process: %w", err)
 	}
 
-	pkgLog.Info("IP Config process finished successfully")
 	return nil
 }
 
