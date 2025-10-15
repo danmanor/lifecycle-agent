@@ -75,7 +75,7 @@ type ProxyConfig struct {
 	NoProxy    string
 }
 
-func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPCOnfigService bool) error {
+func (i *IPConfigHandler) RunIPConfigChange() error {
 	i.log.Infof("Starting IP config process")
 	for _, ipConfig := range i.IPConfigs {
 		i.log.Infof("Changing IP to %s, machine network to %s", ipConfig.IP, ipConfig.MachineNetwork)
@@ -86,7 +86,6 @@ func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPC
 	if err := i.createWorkingDir(); err != nil {
 		return fmt.Errorf("failed to create working directory: %w", err)
 	}
-	defer i.cleanupWorkingDir()
 
 	cryptoDir := path.Join(i.workingDir, common.KubeconfigCryptoDir)
 	if err := i.createCryptoDir(cryptoDir); err != nil {
@@ -109,6 +108,11 @@ func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPC
 	}
 	i.log.Info("Found install config")
 
+	currentNodeIPs, err := utils.GetNodeInternalIPs(ctx, i.runtimeClient)
+	if err != nil {
+		return fmt.Errorf("failed to get current node internal IPs: %w", err)
+	}
+
 	if err := i.CreateNetworkConfiguration(ctx); err != nil {
 		return err
 	}
@@ -117,7 +121,7 @@ func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPC
 		return err
 	}
 
-	if err := i.runRecert(ctx, installConfig, ingressCertificateCN, cryptoDir); err != nil {
+	if err := i.runRecert(ctx, installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs); err != nil {
 		return err
 	}
 
@@ -141,29 +145,22 @@ func (i *IPConfigHandler) RunIPConfigChange(rebootAutomatically bool, disableIPC
 		return err
 	}
 
-	if err := i.removeOvnCertsFolders(); err != nil {
+	if err := i.removeStaleFilesForRegeneration(); err != nil {
 		return err
 	}
 
-	if rebootAutomatically {
-		if err := i.ops.Reboot(); err != nil {
-			return err
-		}
-	}
-
-	if disableIPCOnfigService {
-		i.log.Infof("Disabling systemd service: %s", common.IPConfigService)
-		if _, err := i.ops.SystemctlAction("disable", common.IPConfigService); err != nil {
-			return fmt.Errorf("failed to disable service %s: %w", common.IPConfigService, err)
-		}
-	}
-
-	i.log.Info("Finished IP config process")
+	i.log.Info("IP config process completed successfully")
 
 	return nil
 }
 
-func (i *IPConfigHandler) runRecert(ctx context.Context, installConfig string, ingressCertificateCN string, cryptoDir string) error {
+func (i *IPConfigHandler) runRecert(
+	ctx context.Context,
+	installConfig string,
+	ingressCertificateCN string,
+	cryptoDir string,
+	currentNodeIPs []string,
+) error {
 	i.log.Info("Creating recert configuration file")
 
 	oldIPs := make([]string, len(i.IPConfigs))
@@ -171,7 +168,11 @@ func (i *IPConfigHandler) runRecert(ctx context.Context, installConfig string, i
 	newMachineNetworks := make([]string, len(i.IPConfigs))
 
 	for i, cfg := range i.IPConfigs {
-		oldIPs[i] = cfg.IP
+		oldIP, matchErr := selectIPOfSameFamily(cfg.IP, currentNodeIPs)
+		if matchErr != nil {
+			return fmt.Errorf("failed to select old IP to match new IP %s: %w", cfg.IP, matchErr)
+		}
+		oldIPs[i] = oldIP
 		newIPs[i] = cfg.IP
 		newMachineNetworks[i] = cfg.MachineNetwork
 	}
@@ -242,6 +243,25 @@ func (i *IPConfigHandler) runRecert(ctx context.Context, installConfig string, i
 	}
 
 	return nil
+}
+
+// selectIPOfSameFamily picks the first candidate IP that matches the family (IPv4/IPv6) of newIP
+func selectIPOfSameFamily(newIP string, candidates []string) (string, error) {
+	family := ipFamilyOfString(newIP)
+	for _, c := range candidates {
+		if ipFamilyOfString(c) == family {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no %s NodeInternalIP found", family)
+}
+
+// ipFamilyOfString returns "IPv6" if the IP contains a colon, otherwise "IPv4"
+func ipFamilyOfString(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "IPv6"
+	}
+	return "IPv4"
 }
 
 func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
@@ -335,11 +355,16 @@ func (i *IPConfigHandler) cleanupNMStateAppliedFiles() error {
 	return nil
 }
 
-func (i *IPConfigHandler) removeOvnCertsFolders() error {
-	i.log.Infof("Removing ovn certs folders")
-	dirs := []string{common.OvnNodeCerts, common.MultusCerts}
-	if err := utils.RemoveListOfFolders(i.log, dirs); err != nil {
-		return fmt.Errorf("failed to remove ovn certs in %s: %w", dirs, err)
+func (i *IPConfigHandler) removeStaleFilesForRegeneration() error {
+	i.log.Infof("Removing stale files for regeneration")
+	files := []string{
+		common.OvnIcEtcFolder,
+		common.MultusCerts,
+		common.OvsConfDb,
+		common.OvsConfDbLock,
+	}
+	if err := utils.RemoveListOfFiles(i.log, files); err != nil {
+		return fmt.Errorf("failed to remove stale files for regeneration in %s: %w", files, err)
 	}
 	return nil
 }
@@ -574,13 +599,6 @@ func (i *IPConfigHandler) createWorkingDir() error {
 	return nil
 }
 
-func (i *IPConfigHandler) cleanupWorkingDir() error {
-	if err := os.RemoveAll(i.workingDir); err != nil {
-		return fmt.Errorf("failed to remove working directory %s: %w", i.workingDir, err)
-	}
-	return nil
-}
-
 func (i *IPConfigHandler) createCryptoDir(cryptoDir string) error {
 	if err := os.MkdirAll(cryptoDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create crypto directory: %w", err)
@@ -589,6 +607,7 @@ func (i *IPConfigHandler) createCryptoDir(cryptoDir string) error {
 }
 
 func (i *IPConfigHandler) collectKubeConfigCrypto(ctx context.Context, cryptoDir string) error {
+	i.log.Info("Collecting kubeconfig crypto")
 	if err := utils.BackupKubeconfigCrypto(ctx, i.runtimeClient, cryptoDir); err != nil {
 		return fmt.Errorf("failed to collect kubeconfig crypto: %w", err)
 	}

@@ -109,11 +109,6 @@ type IPConfigSpec struct {
 
 	// Recert image for certificate rotation during configure stage
 	RecertImage string `json:"recertImage,omitempty"`
-
-	// RebootAutomatically, when true, will reboot the node on the same stateroot
-	// after a successful lca-cli ip-config run. Defaults to false.
-	// +kubebuilder:default=false
-	RebootAutomatically bool `json:"rebootAutomatically,omitempty"`
 }
 
 // IPConfigStatus defines the observed state of IPConfig

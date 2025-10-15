@@ -16,54 +16,39 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-type RollbackHandlerInterface interface {
+type IPConfigRollbackHandlerInterface interface {
 	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error)
 }
 
-type RollbackHandler struct {
+type IPConfigRollbackHandler struct {
 	Client          client.Client
 	NoncachedClient client.Reader
 	RPMOstreeClient rpmostreeclient.IClient
 	Executor        ops.Execute
 	Ops             ops.Ops
 	RebootClient    reboot.RebootIntf
-	Logger          logr.Logger
 }
 
-func NewRollbackHandler(
+func NewIPConfigRollbackHandler(
 	client client.Client,
 	noncachedClient client.Reader,
 	rpmostreeClient rpmostreeclient.IClient,
 	executor ops.Execute,
 	ops ops.Ops,
 	rebootClient reboot.RebootIntf,
-	logger logr.Logger,
-) RollbackHandlerInterface {
-	return &RollbackHandler{
+) IPConfigRollbackHandlerInterface {
+	return &IPConfigRollbackHandler{
 		Client:          client,
 		NoncachedClient: noncachedClient,
 		RPMOstreeClient: rpmostreeClient,
 		Executor:        executor,
 		Ops:             ops,
 		RebootClient:    rebootClient,
-		Logger:          logger,
 	}
 }
 
-func (r *RollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.InProgress,
-		metav1.ConditionTrue,
-		controllerutils.InProgress,
-		ipc.Generation,
-	)
-
-	if err := r.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
+func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
 	if r.RPMOstreeClient == nil {
 		return requeueWithError(fmt.Errorf("rpm-ostree client is not set"))
 	}
@@ -128,7 +113,7 @@ func (r *RollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, log
 	return doNotRequeue(), nil
 }
 
-func (r *RollbackHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
+func (r *IPConfigRollbackHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Starting health check after rollback")
 	if err := CheckHealth(ctx, r.NoncachedClient, log.FromContext(ctx)); err != nil {
 		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
@@ -185,6 +170,26 @@ func (r *IPConfigReconciler) handleRollback(ctx context.Context, ipc *ipcv1.IPCo
 		return result, fmt.Errorf("failed to run post pivot: %w", err)
 	}
 
+	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
+		controllerutils.ConditionReasons.Completed,
+		metav1.ConditionFalse,
+		"Rollback completed",
+		ipc.Generation,
+	)
+	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+		controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
+		controllerutils.ConditionReasons.Completed,
+		metav1.ConditionTrue,
+		"Rollback completed",
+		ipc.Generation,
+	)
+
+	if err := r.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	logger.Info("PostPivot completed successfully")
+
 	return result, nil
 }

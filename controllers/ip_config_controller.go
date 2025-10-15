@@ -3,12 +3,10 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/go-logr/logr"
 	ibuv1 "github.com/openshift-kni/lifecycle-agent/api/imagebasedupgrade/v1"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
@@ -29,7 +26,6 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/utils"
-	cp "github.com/otiai10/copy"
 	"github.com/samber/lo"
 )
 
@@ -48,8 +44,9 @@ type IPConfigReconciler struct {
 	RPMOstreeClient  rpmostreeclient.IClient
 	OstreeClient     ostreeclient.IClient
 	Clientset        *kubernetes.Clientset
-	ConfigureHandler ConfigureHandlerInterface
-	RollbackHandler  RollbackHandlerInterface
+	PrepareHandler   IPConfigPrepareHandlerInterface
+	ConfigureHandler IPConfigConfigureHandlerInterface
+	RollbackHandler  IPConfigRollbackHandlerInterface
 	Mux              *sync.Mutex
 }
 
@@ -81,7 +78,7 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	ipc.Status.ObservedGeneration = ipc.Generation
 
-	if err := refreshCurrentIPs(ctx, ipc, r.Client, r.NoncachedClient); err != nil {
+	if err := refreshCurrentIPs(ctx, ipc, r.NoncachedClient); err != nil {
 		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
 	}
 
@@ -108,29 +105,25 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func refreshCurrentIPs(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
-	k8sClient client.Client,
 	nonCachedK8sClient client.Reader,
 ) error {
-	nodeName, err := utils.GetLocalNodeName(ctx, k8sClient)
+	ips, err := utils.GetNodeInternalIPs(ctx, nonCachedK8sClient)
 	if err != nil {
-		return fmt.Errorf("failed to get local node name: %w", err)
+		return fmt.Errorf("failed to get node internal ips: %w", err)
 	}
 
-	node := &corev1.Node{}
-	if err := nonCachedK8sClient.Get(ctx, client.ObjectKey{Name: nodeName}, node); err == nil {
-		status := &ipcv1.ClusterIPsStatus{}
-		for _, addr := range node.Status.Addresses {
-			if addr.Type != corev1.NodeInternalIP {
-				continue
-			}
-			fam := "IPv4"
-			if strings.Contains(addr.Address, ":") {
-				fam = "IPv6"
-			}
-			status.NodeInternalIPs = append(status.NodeInternalIPs, ipcv1.FamilyIP{Family: fam, Address: addr.Address})
+	clusterIPStatus := &ipcv1.ClusterIPsStatus{}
+	for _, addr := range ips {
+		fam := "IPv4"
+		if strings.Contains(addr, ":") {
+			fam = "IPv6"
 		}
-		ipc.Status.ClusterIPs = status
+		clusterIPStatus.NodeInternalIPs = append(
+			clusterIPStatus.NodeInternalIPs,
+			ipcv1.FamilyIP{Family: fam, Address: addr},
+		)
 	}
+	ipc.Status.ClusterIPs = clusterIPStatus
 
 	return nil
 }
@@ -169,33 +162,6 @@ func getNewDeploymentDir(ipc *ipcv1.IPConfig, ostreeClient ostreeclient.IClient)
 	}
 
 	return deploymentDir, nil
-}
-
-// installIPConfigServiceToNewStateroot writes the ip-config systemd unit into the new stateroot etc and enables it
-func (r *IPConfigReconciler) installIPConfigServiceToNewStateroot(ipc *ipcv1.IPConfig, log logr.Logger) error {
-	deploymentDir, err := getNewDeploymentDir(ipc, r.OstreeClient)
-	if err != nil {
-		return err
-	}
-
-	if err := r.Ops.RemountSysroot(); err != nil {
-		return fmt.Errorf("failed to remount sysroot: %w", err)
-	}
-
-	unitSrc := filepath.Join(common.IPConfigurationFilesDir, "services", common.IPConfigService)
-	unitDstDir := common.PathOutsideChroot(filepath.Join(deploymentDir, "etc", "systemd", "system"))
-
-	log.Info("Creating service", "name", common.IPConfigService)
-	if err := cp.Copy(unitSrc, filepath.Join(unitDstDir, common.IPConfigService)); err != nil {
-		return fmt.Errorf("failed to create service %s: %w", common.IPConfigService, err)
-	}
-
-	log.Info("Enabling service", "name", common.IPConfigService)
-	if _, err := r.Ops.SystemctlAction("enable", common.IPConfigService); err != nil {
-		return fmt.Errorf("failed to enable service %s: %w", common.IPConfigService, err)
-	}
-
-	return nil
 }
 
 // isTargetStaterootBooted determines whether the stateroot prepared for this IP change is currently booted.

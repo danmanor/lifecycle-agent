@@ -482,7 +482,7 @@ func GetInstallConfig(ctx context.Context, client runtimeclient.Client) (string,
 }
 
 // getLocalNodeName returns the current node's name from the hostname.
-func GetLocalNodeName(ctx context.Context, client runtimeclient.Client) (string, error) {
+func GetLocalNodeName(ctx context.Context, client client.Reader) (string, error) {
 	nodeList := &corev1.NodeList{}
 	if err := client.List(ctx, nodeList); err != nil {
 		return "", fmt.Errorf("failed to list nodes: %w", err)
@@ -493,4 +493,29 @@ func GetLocalNodeName(ctx context.Context, client runtimeclient.Client) (string,
 	}
 
 	return nodeList.Items[0].Name, nil
+}
+
+func GetNodeInternalIPs(ctx context.Context, client client.Reader) ([]string, error) {
+	nodeName, err := GetLocalNodeName(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+
+	node := &corev1.Node{}
+	if err := client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	var ips []string
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			ips = append(ips, addr.Address)
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("failed to find node internal ip addresses")
+	}
+
+	return ips, nil
 }

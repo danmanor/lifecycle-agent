@@ -601,7 +601,7 @@ func (s *SeedCreator) filterCatalogImages(ctx context.Context, images []string) 
 func (s *SeedCreator) removeOvnCertsFolders() error {
 	s.log.Infof("Removing ovn certs folders")
 	dirs := []string{common.OvnNodeCerts, common.MultusCerts}
-	if err := utils.RemoveListOfFolders(s.log, dirs); err != nil {
+	if err := utils.RemoveListOfFiles(s.log, dirs); err != nil {
 		return fmt.Errorf("failed to remove ovn certs in %s: %w", dirs, err)
 	}
 	return nil

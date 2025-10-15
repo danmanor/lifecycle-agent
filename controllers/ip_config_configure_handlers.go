@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -22,82 +21,52 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-type ConfigureHandlerInterface interface {
+type IPConfigConfigureHandlerInterface interface {
 	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error)
 }
 
-type ConfigureHandler struct {
+type IPConfigConfigureHandler struct {
 	Client          client.Client
 	NoncachedClient client.Reader
 	Executor        ops.Execute
 	Ops             ops.Ops
 	RebootClient    reboot.RebootIntf
 	OstreeClient    ostreeclient.IClient
-	logger          logr.Logger
 }
 
-func NewConfigureHandler(
+func NewIPConfigConfigureHandler(
 	client client.Client,
 	noncachedClient client.Reader,
 	executor ops.Execute,
 	ops ops.Ops,
 	rebootClient reboot.RebootIntf,
-	logger logr.Logger,
-) ConfigureHandlerInterface {
-	return &ConfigureHandler{
+	ostreeClient ostreeclient.IClient,
+) IPConfigConfigureHandlerInterface {
+	return &IPConfigConfigureHandler{
 		Client:          client,
 		NoncachedClient: noncachedClient,
 		Executor:        executor,
 		Ops:             ops,
 		RebootClient:    rebootClient,
-		logger:          logger,
+		OstreeClient:    ostreeClient,
 	}
 }
 
-func (c *ConfigureHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
-		controllerutils.ConditionReasons.InProgress,
-		metav1.ConditionTrue,
-		controllerutils.InProgress,
-		ipc.Generation,
-	)
-
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
-	if err := c.writeIPConfigRunConfigToNewStateroot(ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to write ip-config run config to new stateroot: %w", err))
-	}
-
-	lcaBinarySrc := "/usr/local/bin/lca-cli"
-	lcaBinaryDst := common.PathOutsideChroot("/var/usrlocal/bin/lca-cli")
-	logger.Info("Copying lca-cli binary to host for ip-config run", "src", lcaBinarySrc, "dst", lcaBinaryDst)
-	if err := cp.Copy(lcaBinarySrc, lcaBinaryDst, cp.Options{AddPermission: os.FileMode(0o777)}); err != nil {
-		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary to host: %w", err))
-	}
-
-	if c.RebootClient == nil {
-		return requeueWithError(fmt.Errorf("reboot client is not set"))
-	}
-
-	logger.Info("PrePivot Completed. Rebooting to new stateroot")
-
-	if err := c.RebootClient.RebootToNewStateRoot("ip-config"); err != nil {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			err.Error(),
-			ipc.Generation,
-		)
+func (c *IPConfigConfigureHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	if err := c.writeIPConfigRunConfig(ipc); err != nil {
 		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
 			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
 			controllerutils.ConditionReasons.Failed,
 			metav1.ConditionFalse,
-			err.Error(),
+			fmt.Sprintf("failed to write ip-config run config: %s", err.Error()),
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to write ip-config run config: %s", err.Error()),
 			ipc.Generation,
 		)
 
@@ -105,15 +74,79 @@ func (c *ConfigureHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, lo
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		return requeueWithError(fmt.Errorf("failed to reboot to new stateroot: %w", err))
+		return doNotRequeue(), fmt.Errorf("failed to write ip-config run config: %w", err)
 	}
 
-	// We should no reach here
+	if err := c.copyLcaCli(logger); err != nil {
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()),
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()),
+			ipc.Generation,
+		)
 
+		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return doNotRequeue(), fmt.Errorf("failed to copy lca-cli binary: %w", err)
+	}
+
+	log.FromContext(ctx).Info("Scheduling lca-cli ip-config run via systemd-run")
+	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+		controllerutils.ConditionReasons.InProgress,
+		metav1.ConditionTrue,
+		"lca-cli ip-config run scheduled",
+		ipc.Generation,
+	)
+	if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	args := []string{
+		"--property", "ExitType=cgroup",
+		"--unit", "lca-ipconfig-run",
+		"--description", "lifecycle-agent: ip-config run",
+		"lca-cli", "ip-config", "run",
+	}
+	if _, err := c.Executor.Execute("systemd-run", args...); err != nil {
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to run ip-config: %s", err.Error()),
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to run ip-config: %s", err.Error()),
+			ipc.Generation,
+		)
+
+		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
+		return doNotRequeue(), fmt.Errorf("failed to schedule ip-config run: %w", err)
+	}
+
+	// should not reach here on successful ip-config run
 	return doNotRequeue(), nil
 }
 
-func (c *ConfigureHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
+// PreConfigure and PostConfigure were merged into PrePivot
+
+func (c *IPConfigConfigureHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Starting health check for different components")
 	if err := CheckHealth(ctx, c.NoncachedClient, log.FromContext(ctx)); err != nil {
 		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
@@ -144,12 +177,27 @@ func (c *ConfigureHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	if err := refreshCurrentIPs(ctx, ipc, c.Client, c.NoncachedClient); err != nil {
-		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
-	}
+	if err := refreshCurrentIPs(ctx, ipc, c.NoncachedClient); err != nil {
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to refresh current IPs: %s", err.Error()),
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("failed to refresh current IPs: %s", err.Error()),
+			ipc.Generation,
+		)
 
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
+		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
 	}
 
 	if err := statusIPsMatchSpec(ipc); err != nil {
@@ -183,6 +231,19 @@ func (c *ConfigureHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (
 	}
 
 	return doNotRequeue(), nil
+}
+
+// copyLcaCli copies the lca-cli binary from the container into /var/usrlocal/bin
+func (c *IPConfigConfigureHandler) copyLcaCli(logger logr.Logger) error {
+	lcaBinarySrc := "/usr/local/bin/lca-cli"
+	lcaBinaryDst := common.PathOutsideChroot("/var/usrlocal/bin/lca-cli")
+
+	logger.Info("Copying lca-cli binary", "src", lcaBinarySrc, "dst", lcaBinaryDst)
+	if err := cp.Copy(lcaBinarySrc, lcaBinaryDst, cp.Options{AddPermission: os.FileMode(0o777)}); err != nil {
+		return fmt.Errorf("failed to copy lca-cli binary: %w", err)
+	}
+
+	return nil
 }
 
 // statusIPsMatchSpec checks whether the IPs requested in spec are present in status.ClusterIPs.
@@ -243,37 +304,73 @@ func (r *IPConfigReconciler) handleConfigure(
 	logger := log.FromContext(ctx).WithName("IPConfigConfigure")
 	logger.Info("Starting handleConfigure")
 
-	isBeforePivot := !isTargetStaterootBooted(ipc, r.RPMOstreeClient)
-
-	if isBeforePivot {
-		logger.Info("Running PrePivot handler")
-		return r.ConfigureHandler.PrePivot(ctx, ipc, logger)
-	}
-
-	logger.Info("Running PostPivot handler")
-	result, err := r.ConfigureHandler.PostPivot(ctx, ipc)
+	phase, message, err := ipConfigRunStatus()
 	if err != nil {
-		return result, fmt.Errorf("failed to run PostPivot: %w", err)
+		return requeueWithError(fmt.Errorf("failed to read ip-config run status: %w", err))
 	}
 
-	logger.Info("PostPivot completed successfully")
-	return result, nil
+	switch phase {
+	case common.IPConfigRunPhaseUnknown:
+		logger.Info("Running IP config PrePivot handler")
+		return r.ConfigureHandler.PrePivot(ctx, ipc, logger)
+	case common.IPConfigRunPhaseRunning:
+		logger.Info("ip-config run in progress; requeueing")
+		return requeueWithShortInterval(), nil
+	case common.IPConfigRunPhaseFailed:
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("ip-config run failed: %s", message),
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Failed,
+			metav1.ConditionFalse,
+			fmt.Sprintf("ip-config run failed: %s", message),
+			ipc.Generation,
+		)
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return doNotRequeue(), fmt.Errorf("ip-config run failed: %s", message)
+	case common.IPConfigRunPhaseSucceeded:
+		logger.Info("Running IP config PostPivot handler")
+		result, err := r.ConfigureHandler.PostPivot(ctx, ipc)
+		if err != nil {
+			return result, fmt.Errorf("failed to run PostPivot: %w", err)
+		}
+
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Completed,
+			metav1.ConditionFalse,
+			"Configuration completed",
+			ipc.Generation,
+		)
+		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
+			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Configure),
+			controllerutils.ConditionReasons.Completed,
+			metav1.ConditionTrue,
+			"Configuration completed",
+			ipc.Generation,
+		)
+
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
+		logger.Info("PostPivot completed successfully")
+		return result, nil
+	default:
+		return requeueWithShortInterval(), nil
+	}
 }
 
 // writeIPConfigRunConfigToNewStateroot writes the ip-config run configuration file into the new stateroot etc
-func (c *ConfigureHandler) writeIPConfigRunConfigToNewStateroot(ipc *ipcv1.IPConfig) error {
-	deploymentDir, err := getNewDeploymentDir(ipc, c.OstreeClient)
-	if err != nil {
-		return err
-	}
-
-	etcLcaDir := filepath.Join(deploymentDir, "etc", "lca")
-	if err := os.MkdirAll(etcLcaDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create /etc/lca dir in new stateroot: %w", err)
-	}
-	cfg := common.IPConfigRunConfig{
-		DisableIPConfigService: true,
-	}
+func (c *IPConfigConfigureHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig) error {
+	cfg := common.IPConfigRunConfig{}
 
 	if v := ipc.Spec.IPv4; v != nil {
 		if v.Address != "" {
@@ -302,15 +399,36 @@ func (c *ConfigureHandler) writeIPConfigRunConfigToNewStateroot(ipc *ipcv1.IPCon
 			cfg.NoProxy = strings.Join(p.NoProxy, ",")
 		}
 	}
-	// PullSecretRef not yet resolved to a file path in controller
-	cfg.RebootAutomatically = ipc.Spec.RebootAutomatically
 
 	data, err := json.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal ip-config flags: %w", err)
+		return fmt.Errorf("failed to marshal ip-config run config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(etcLcaDir, "ip-config-run.json"), data, 0o600); err != nil {
-		return fmt.Errorf("failed to write ip-config-run.json: %w", err)
+	if err := os.WriteFile(common.PathOutsideChroot(common.IPConfigRunFlagsFile), data, 0o600); err != nil {
+		return fmt.Errorf("failed to write ip-config run config: %w", err)
 	}
+
 	return nil
+}
+
+// ipConfigRunStatus reads the status file written by lca-cli and returns typed phase and message.
+// Unknown is returned when the status file is not found.
+func ipConfigRunStatus() (common.IPConfigRunStatusPhase, string, error) {
+	data, err := os.ReadFile(common.PathOutsideChroot(common.IPConfigRunStatusFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return common.IPConfigRunPhaseUnknown, "", nil
+		}
+		return common.IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to read ip-config status file: %w", err)
+	}
+	var st common.IPConfigRunStatus
+	if err := json.Unmarshal(data, &st); err != nil {
+		return common.IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to parse ip-config status file: %w", err)
+	}
+	switch st.Phase {
+	case common.IPConfigRunPhaseRunning, common.IPConfigRunPhaseSucceeded, common.IPConfigRunPhaseFailed:
+		return st.Phase, st.Message, nil
+	default:
+		return common.IPConfigRunPhaseUnknown, st.Message, nil
+	}
 }

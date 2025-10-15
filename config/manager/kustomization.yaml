@@ -13,6 +13,6 @@ configMapGenerator:
 images:
 - name: controller
   newName: quay.io/dmanor/lca
-  newTag: ip-config-v15
+  newTag: ip-config-v26
 patches:
 - path: related-images/patch.yaml

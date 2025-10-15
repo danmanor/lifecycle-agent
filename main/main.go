@@ -322,22 +322,30 @@ func main() {
 		OstreeClient:    ostreeClient,
 		RPMOstreeClient: rpmOstreeClient,
 		Mux:             mux,
-		ConfigureHandler: controllers.NewConfigureHandler(
+		PrepareHandler: controllers.NewIPConfigPrepareHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			executor,
 			op,
 			rebootClient,
-			log,
+			mgr.GetScheme(),
+			clientset,
 		),
-		RollbackHandler: controllers.NewRollbackHandler(
+		ConfigureHandler: controllers.NewIPConfigConfigureHandler(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			executor,
+			op,
+			rebootClient,
+			ostreeClient,
+		),
+		RollbackHandler: controllers.NewIPConfigRollbackHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			rpmOstreeClient,
 			executor,
 			op,
 			rebootClient,
-			log,
 		),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPConfig")

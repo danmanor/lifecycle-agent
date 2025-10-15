@@ -107,12 +107,6 @@ spec:
                 description: pullSecretRef is the name of a Secret in the openshift-config
                   namespace containing .dockerconfigjson
                 type: string
-              rebootAutomatically:
-                default: false
-                description: |-
-                  RebootAutomatically, when true, will reboot the node on the same stateroot
-                  after a successful lca-cli ip-config run. Defaults to false.
-                type: boolean
               recertImage:
                 description: Recert image for certificate rotation during configure
                   stage

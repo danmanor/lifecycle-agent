@@ -256,11 +256,11 @@ func ReplaceImageRegistry(image, targetRegistry, sourceRegistry string) (string,
 	return re.ReplaceAllString(image, targetRegistry), nil
 }
 
-func RemoveListOfFolders(log *logrus.Logger, folders []string) error {
-	for _, folder := range folders {
-		log.Infof("Removing %s folder", folder)
-		if err := os.RemoveAll(folder); err != nil {
-			return fmt.Errorf("failed to remove %s folder: %w", folder, err)
+func RemoveListOfFiles(log *logrus.Logger, files []string) error {
+	for _, file := range files {
+		log.Infof("Removing %s file", file)
+		if err := os.RemoveAll(file); err != nil {
+			return fmt.Errorf("failed to remove %s file: %w", file, err)
 		}
 	}
 	return nil

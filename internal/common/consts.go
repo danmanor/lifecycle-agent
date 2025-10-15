@@ -47,8 +47,10 @@ const (
 	OvnIcEtcFolder = "/var/lib/ovn-ic/etc"
 	OvnNodeCerts   = OvnIcEtcFolder + "/ovnkube-node-certs"
 
-	MultusCerts  = "/etc/cni/multus/certs"
-	ChronyConfig = "/etc/chrony.conf"
+	MultusCerts   = "/etc/cni/multus/certs"
+	ChronyConfig  = "/etc/chrony.conf"
+	OvsConfDb     = "/etc/openvswitch/conf.db"
+	OvsConfDbLock = "/etc/openvswitch/.conf.db.~lock~"
 
 	SSHServerKeysDirectory = "/etc/ssh"
 
@@ -70,8 +72,10 @@ const (
 	LvmDevicesPath                    = "/etc/lvm/devices/system.devices"
 	CABundleFilePath                  = "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
 
-	LCAConfigDir                                    = "/var/lib/lca"
-	IPConfigRunFlagsFile                            = LCAConfigDir + "/ip-config-run.json"
+	LCAConfigDir          = "/var/lib/lca"
+	IPConfigRunFlagsFile  = LCAConfigDir + "/ip-config-run.json"
+	IPConfigRunStatusFile = LCAConfigDir + "/ip-config-run-status.json"
+
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800
 	IBUInitMonitorService                           = "lca-init-monitor.service"
@@ -136,8 +140,7 @@ const (
 
 	DnsmasqOverrides = "/etc/default/sno_dnsmasq_configuration_overrides"
 
-	IPConfigService = "ip-configuration.service"
-	IPConfigName    = "ipconfig"
+	IPConfigName = "ipconfig"
 )
 
 // Annotation names and values related to extra manifest

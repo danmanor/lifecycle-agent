@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -39,16 +40,14 @@ var (
 	ipConfigScheme = runtime.NewScheme()
 
 	// IP configuration parameters
-	ipv4Address            string
-	ipv4MachineNetwork     string
-	ipv6Address            string
-	ipv6MachineNetwork     string
-	httpProxy              string
-	httpsProxy             string
-	noProxy                string
-	pullSecretFile         string
-	disableIPConfigService bool
-	rebootAutomatically    bool
+	ipv4Address        string
+	ipv4MachineNetwork string
+	ipv6Address        string
+	ipv6MachineNetwork string
+	httpProxy          string
+	httpsProxy         string
+	noProxy            string
+	pullSecretFile     string
 )
 
 const (
@@ -71,8 +70,6 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretFile, "pull-secret-file", "", "Path to pull secret auth file to use for image pulls")
-	ipConfigRunCmd.Flags().BoolVar(&disableIPConfigService, "disable-ip-config-service", false, "Disable ip-configuration.service at the end of ip-config run")
-	ipConfigRunCmd.Flags().BoolVar(&rebootAutomatically, "reboot-automatically", false, "Reboot after successful IP reconfiguration")
 }
 
 var ipConfigRunCmd = &cobra.Command{
@@ -86,6 +83,16 @@ var ipConfigRunCmd = &cobra.Command{
 }
 
 func runIPConfigChange() error {
+	err := writeIPConfigRunStatus(
+		common.IPConfigRunStatus{
+			Phase:     common.IPConfigRunPhaseRunning,
+			Message:   "ip-config run started",
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	if err != nil {
+		return fmt.Errorf("failed to write initial status: %w", err)
+	}
+
 	if data, err := os.ReadFile(common.IPConfigRunFlagsFile); err == nil && len(data) > 0 {
 		var cfg common.IPConfigRunConfig
 		if jsonErr := json.Unmarshal(data, &cfg); jsonErr == nil {
@@ -97,8 +104,6 @@ func runIPConfigChange() error {
 			httpsProxy = cfg.HTTPSProxy
 			noProxy = cfg.NoProxy
 			pullSecretFile = cfg.PullSecretFile
-			disableIPConfigService = cfg.DisableIPConfigService
-			rebootAutomatically = cfg.RebootAutomatically
 		} else {
 			pkgLog.Warnf("failed to unmarshal ip-config run config: %v", jsonErr)
 		}
@@ -148,11 +153,57 @@ func runIPConfigChange() error {
 		pullSecretFile,
 	)
 
-	if err = ipConfigHandler.RunIPConfigChange(rebootAutomatically, disableIPConfigService); err != nil {
+	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
+		err := finalizeIPConfigRunStatus(
+			common.IPConfigRunPhaseFailed,
+			fmt.Sprintf("ip-config run failed: %v", err),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to mark IP config run as failed: %w", err)
+		}
 		return fmt.Errorf("failed to run IP config process: %w", err)
 	}
 
+	if err := finalizeIPConfigRunStatus(
+		common.IPConfigRunPhaseSucceeded,
+		"ip-config run completed successfully; scheduling reboot",
+	); err != nil {
+		return fmt.Errorf("failed to mark IP config run as successful: %w", err)
+	}
+
+	hostExec := ops.NewNsenterExecutor(pkgLog, true)
+	if _, err := hostExec.Execute(
+		"systemd-run",
+		"--unit", "lca-ipconfig-reboot",
+		"--description", "lifecycle-agent: ip-config reboot",
+		"systemctl", "reboot",
+	); err != nil {
+		return fmt.Errorf("failed to schedule reboot: %w", err)
+	}
+
 	return nil
+}
+
+// writeIPConfigRunStatus writes current status to the status file.
+func writeIPConfigRunStatus(st common.IPConfigRunStatus) error {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(common.IPConfigRunStatusFile, data, 0o600)
+}
+
+// finalizeIPConfigRunStatus sets final phase, message, finishedAt.
+func finalizeIPConfigRunStatus(phase common.IPConfigRunStatusPhase, msg string) error {
+	st := common.IPConfigRunStatus{Phase: phase, Message: msg, FinishedAt: time.Now().UTC().Format(time.RFC3339)}
+	// Preserve StartedAt if exists
+	if data, err := os.ReadFile(common.IPConfigRunStatusFile); err == nil && len(data) > 0 {
+		var prev common.IPConfigRunStatus
+		if jsonErr := json.Unmarshal(data, &prev); jsonErr == nil {
+			st.StartedAt = prev.StartedAt
+		}
+	}
+	return writeIPConfigRunStatus(st)
 }
 
 // validateIPConfigArgs validates the CLI arguments for IP configuration.

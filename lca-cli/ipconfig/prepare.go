@@ -59,7 +59,7 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		return err
 	}
 
-	if err := p.copyStateRootData(currentStateroot, newStateroot, bootedCommit); err != nil {
+	if err := p.copyStateRootData(currentStateroot, newStateroot); err != nil {
 		return err
 	}
 
@@ -135,48 +135,49 @@ func (p *PrepareHandler) deployNewStateroot(newStateroot, bootedCommit string, k
 	return nil
 }
 
-func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot, bootedCommit string) error {
+func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string) error {
 	oldSRPath := common.GetStaterootPath(currentStateroot)
 	newSRPath := common.GetStaterootPath(newStateroot)
-	oldVar := filepath.Join(oldSRPath, "var")
-	newVarParent := newSRPath
-	oldCommitDir := filepath.Join(oldSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit))
-	newCommitDir := filepath.Join(newSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit))
 
-	_ = os.MkdirAll(newCommitDir, 0o755)
-	_ = os.MkdirAll(newCommitDir, 0o755)
-
-	if _, err := p.ops.RunInHostNamespace(
-		"bash", "-c",
-		fmt.Sprintf(
-			"cp -ar --preserve=context '%s/' '%s/'",
-			oldVar,
-			newVarParent,
-		),
-	); err != nil {
-		return fmt.Errorf("failed to copy var: %w", err)
+	oldDeploymentDir, err := p.ostree.GetDeploymentDir(currentStateroot)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment dir for %s: %w", currentStateroot, err)
+	}
+	newDeploymentDir, err := p.ostree.GetDeploymentDir(newStateroot)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment dir for %s: %w", newStateroot, err)
 	}
 
-	if _, err := p.ops.RunInHostNamespace(
-		"bash", "-c",
-		fmt.Sprintf(
-			"cp -ar --preserve=context '%s/' '%s/'",
-			filepath.Join(oldCommitDir, "etc"),
-			newCommitDir,
-		),
-	); err != nil {
-		return fmt.Errorf("failed to copy etc: %w", err)
+	err = os.MkdirAll(oldDeploymentDir, 0o755)
+	if err != nil {
+		return fmt.Errorf("failed to create deployment dir for %s: %w", currentStateroot, err)
+	}
+	err = os.MkdirAll(newDeploymentDir, 0o755)
+	if err != nil {
+		return fmt.Errorf("failed to create deployment dir for %s: %w", newStateroot, err)
 	}
 
-	if _, err := p.ops.RunInHostNamespace(
-		"bash", "-c",
-		fmt.Sprintf(
-			"cp -a --preserve=context '%s' '%s'",
-			fmt.Sprintf("%s.%s", filepath.Join(oldSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit)), "origin"),
-			fmt.Sprintf("%s.%s", filepath.Join(newSRPath, "deploy", fmt.Sprintf("%s.0", bootedCommit)), "origin"),
-		),
-	); err != nil {
-		return fmt.Errorf("failed to copy origin file: %w", err)
+	// We copy using tar to exclude ephemeral files that are not needed for the new stateroot
+	// and may cause races during copy.
+	if err := p.copyVarWithTar(oldSRPath, newSRPath); err != nil {
+		return err
+	}
+
+	if err := p.copyEtc(oldDeploymentDir, newDeploymentDir); err != nil {
+		return err
+	}
+
+	oldDeploymentName, err := p.ostree.GetDeployment(currentStateroot)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment for %s: %w", currentStateroot, err)
+	}
+	newDeploymentName, err := p.ostree.GetDeployment(newStateroot)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment for %s: %w", newStateroot, err)
+	}
+
+	if err := p.copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymentName, newDeploymentName); err != nil {
+		return err
 	}
 
 	return nil
@@ -193,6 +194,81 @@ func (p *PrepareHandler) setDefaultDeploymentIfEnabled(newStateroot string) erro
 	}
 	if err := p.ostree.SetDefaultDeployment(idx); err != nil {
 		return fmt.Errorf("failed to set default deployment: %w", err)
+	}
+	return nil
+}
+
+// copyVarWithTar archives the var directory from old stateroot with excludes and restores it into the new stateroot.
+func (p *PrepareHandler) copyVarWithTar(oldSRPath, newSRPath string) error {
+	newVarParent := newSRPath
+
+	// Archive old stateroot var with excludes to avoid races, then extract into the new stateroot
+	tarPath := filepath.Join(newSRPath, "var.tgz")
+	excludePatterns := []string{
+		"*/.bash_history",
+		"var/tmp/*",
+		"var/log/*",
+		"var/lib/lca",
+		"var/lib/log/*",
+		"var/lib/cni/bin/*",
+		strings.TrimPrefix(common.ContainerStoragePath, "/") + "/*",
+		"var/lib/kubelet/pods/*",
+		strings.TrimPrefix(common.OvnIcEtcFolder, "/") + "/*",
+	}
+
+	// Build tar args: tar czf <tarPath> --exclude ... -C <oldSRPath> var <TarOpts> --ignore-failed-read
+	tarArgs := []string{"czf", tarPath}
+	for _, pattern := range excludePatterns {
+		tarArgs = append(tarArgs, "--exclude", pattern)
+	}
+	tarArgs = append(tarArgs, "-C", oldSRPath, "var")
+	tarArgs = append(tarArgs, common.TarOpts...)
+	tarArgs = append(tarArgs, "--ignore-failed-read")
+
+	if _, err := p.ops.RunInHostNamespace("tar", tarArgs...); err != nil {
+		return fmt.Errorf("failed to archive var directory: %w", err)
+	}
+
+	if err := p.ops.ExtractTarWithSELinux(tarPath, newVarParent); err != nil {
+		return fmt.Errorf("failed to extract var archive: %w", err)
+	}
+
+	if _, err := p.ops.RunInHostNamespace("rm", "-f", tarPath); err != nil {
+		p.log.Warnf("failed to remove temporary var archive %s: %v", tarPath, err)
+	}
+
+	return nil
+}
+
+// copyEtc copies the deployment's etc directory preserving SELinux contexts
+func (p *PrepareHandler) copyEtc(oldDeploymentDir, newDeploymentDir string) error {
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -ar --preserve=context '%s/' '%s/'",
+			filepath.Join(oldDeploymentDir, "etc"),
+			newDeploymentDir,
+		),
+	); err != nil {
+		return fmt.Errorf("failed to copy etc: %w", err)
+	}
+	return nil
+}
+
+// copyOrigin copies the .origin file between deployments preserving SELinux context
+func (p *PrepareHandler) copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymentName, newDeploymentName string) error {
+	oldOriginPath := filepath.Join(oldSRPath, "deploy", fmt.Sprintf("%s.origin", oldDeploymentName))
+	newOriginPath := filepath.Join(newSRPath, "deploy", fmt.Sprintf("%s.origin", newDeploymentName))
+
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -a --preserve=context '%s' '%s'",
+			oldOriginPath,
+			newOriginPath,
+		),
+	); err != nil {
+		return fmt.Errorf("failed to copy origin file: %w", err)
 	}
 	return nil
 }
