@@ -82,17 +82,17 @@ func (mr *MockOpsMockRecorder) CreateIsoWithEmbeddedIgnition(log, ignitionBytes,
 }
 
 // EnableClusterServices mocks base method.
-func (m *MockOps) EnableClusterServices() error {
+func (m *MockOps) EnableClusterServices(root string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "EnableClusterServices")
+	ret := m.ctrl.Call(m, "EnableClusterServices", root)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // EnableClusterServices indicates an expected call of EnableClusterServices.
-func (mr *MockOpsMockRecorder) EnableClusterServices() *gomock.Call {
+func (mr *MockOpsMockRecorder) EnableClusterServices(root any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableClusterServices", reflect.TypeOf((*MockOps)(nil).EnableClusterServices))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableClusterServices", reflect.TypeOf((*MockOps)(nil).EnableClusterServices), root)
 }
 
 // EnsureNMStateConfigurationServiceEnabled mocks base method.

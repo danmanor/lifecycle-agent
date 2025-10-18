@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
@@ -91,5 +92,35 @@ func runIPConfigPrepare() error {
 	rbClient := reboot.NewRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
 	preparer := ipconfig.NewPrepareHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rbClient, client)
-	return preparer.RunPrepare(context.Background(), newIPv4, newIPv6)
+	if err := common.WriteIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunStatus{
+		Phase:     common.IPConfigRunPhaseRunning,
+		Message:   "ip-config prepare started",
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return fmt.Errorf("failed to write initial prepare status: %w", err)
+	}
+
+	if err := preparer.RunPrepare(context.Background(), newIPv4, newIPv6); err != nil {
+		internalErr := common.FinalizeIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunPhaseFailed, fmt.Sprintf("ip-config prepare failed: %v", err))
+		if internalErr != nil {
+			return fmt.Errorf("failed to finalize IP config prepare status: %w", internalErr)
+		}
+		return err
+	}
+
+	if err := common.FinalizeIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunPhaseSucceeded, "ip-config prepare completed successfully; scheduling reboot"); err != nil {
+		return fmt.Errorf("failed to mark prepare as successful: %w", err)
+	}
+
+	hostExec := ops.NewNsenterExecutor(pkgLog, true)
+	if _, err := hostExec.Execute(
+		"systemd-run",
+		"--unit", "lca-ipconfig-prepare-reboot",
+		"--description", "lifecycle-agent: ip-config prepare reboot",
+		"systemctl", "reboot",
+	); err != nil {
+		return fmt.Errorf("failed to schedule reboot: %w", err)
+	}
+
+	return nil
 }

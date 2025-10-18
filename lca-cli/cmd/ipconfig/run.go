@@ -83,7 +83,7 @@ var ipConfigRunCmd = &cobra.Command{
 }
 
 func runIPConfigChange() error {
-	err := writeIPConfigRunStatus(
+	err := common.WriteIPConfigStatus(common.IPConfigRunStatusFile,
 		common.IPConfigRunStatus{
 			Phase:     common.IPConfigRunPhaseRunning,
 			Message:   "ip-config run started",
@@ -154,17 +154,19 @@ func runIPConfigChange() error {
 	)
 
 	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
-		err := finalizeIPConfigRunStatus(
+		internalErr := common.FinalizeIPConfigStatus(
+			common.IPConfigRunStatusFile,
 			common.IPConfigRunPhaseFailed,
 			fmt.Sprintf("ip-config run failed: %v", err),
 		)
-		if err != nil {
-			return fmt.Errorf("failed to mark IP config run as failed: %w", err)
+		if internalErr != nil {
+			return fmt.Errorf("failed to finalize IP config run status: %w", internalErr)
 		}
 		return fmt.Errorf("failed to run IP config process: %w", err)
 	}
 
-	if err := finalizeIPConfigRunStatus(
+	if err := common.FinalizeIPConfigStatus(
+		common.IPConfigRunStatusFile,
 		common.IPConfigRunPhaseSucceeded,
 		"ip-config run completed successfully; scheduling reboot",
 	); err != nil {
@@ -182,28 +184,6 @@ func runIPConfigChange() error {
 	}
 
 	return nil
-}
-
-// writeIPConfigRunStatus writes current status to the status file.
-func writeIPConfigRunStatus(st common.IPConfigRunStatus) error {
-	data, err := json.Marshal(st)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(common.IPConfigRunStatusFile, data, 0o600)
-}
-
-// finalizeIPConfigRunStatus sets final phase, message, finishedAt.
-func finalizeIPConfigRunStatus(phase common.IPConfigRunStatusPhase, msg string) error {
-	st := common.IPConfigRunStatus{Phase: phase, Message: msg, FinishedAt: time.Now().UTC().Format(time.RFC3339)}
-	// Preserve StartedAt if exists
-	if data, err := os.ReadFile(common.IPConfigRunStatusFile); err == nil && len(data) > 0 {
-		var prev common.IPConfigRunStatus
-		if jsonErr := json.Unmarshal(data, &prev); jsonErr == nil {
-			st.StartedAt = prev.StartedAt
-		}
-	}
-	return writeIPConfigRunStatus(st)
 }
 
 // validateIPConfigArgs validates the CLI arguments for IP configuration.

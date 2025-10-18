@@ -27,3 +27,8 @@ var (
 
 	StoredPullSecret = filepath.Join(SeedgenWorkspacePath, "pull-secret.json")
 )
+
+const (
+	LcaCliBinaryContainerPath = "/usr/local/bin/lca-cli"
+	LcaCliBinaryHostPath      = "/var/usrlocal/bin/lca-cli"
+)

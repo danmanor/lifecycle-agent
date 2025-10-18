@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// IPConfigPrepareJobName is the name of the job that runs ip-config prepare
+	// IPConfigPrepareJobName is deprecated; prepare now runs via systemd unit
 	IPConfigPrepareJobName      = "lca-ipconfig-prepare"
 	ipConfigPrepareJobFinalizer = "lca.openshift.io/ipconfig-prepare-finalizer"
 )

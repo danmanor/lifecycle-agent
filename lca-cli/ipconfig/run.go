@@ -129,7 +129,7 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 		return err
 	}
 
-	if err := i.ops.EnableClusterServices(); err != nil {
+	if err := i.ops.EnableClusterServices(""); err != nil {
 		return err
 	}
 

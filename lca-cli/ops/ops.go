@@ -65,7 +65,7 @@ type Ops interface {
 	CreateIsoWithEmbeddedIgnition(log logrus.FieldLogger, ignitionBytes []byte, baseIsoPath, outputIsoPath string) error
 	GetContainerStorageTarget() (string, error)
 	StopClusterServices() error
-	EnableClusterServices() error
+	EnableClusterServices(root string) error
 	EnsureNMStateConfigurationServiceEnabled() error
 	Reboot() error
 }
@@ -673,9 +673,14 @@ func (o *ops) StopClusterServices() error {
 	return nil
 }
 
-func (o *ops) EnableClusterServices() error {
+func (o *ops) EnableClusterServices(root string) error {
 	o.log.Info("Enabling kubelet service")
-	_, err := o.SystemctlAction("enable", "kubelet.service")
+	args := []string{}
+	if root != "" {
+		args = append(args, "--root", root)
+	}
+	args = append(args, "kubelet.service")
+	_, err := o.SystemctlAction("enable", args...)
 	if err != nil {
 		return fmt.Errorf("failed to enable kubelet: %w", err)
 	}

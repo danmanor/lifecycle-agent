@@ -68,7 +68,6 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 	}
 
 	p.log.Info("IP config prepare done successfully")
-
 	return nil
 }
 
@@ -157,13 +156,20 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string
 		return fmt.Errorf("failed to create deployment dir for %s: %w", newStateroot, err)
 	}
 
-	// We copy using tar to exclude ephemeral files that are not needed for the new stateroot
-	// and may cause races during copy.
-	if err := p.copyVarWithTar(oldSRPath, newSRPath); err != nil {
+	// Stop cluster services to avoid races and dynamically-written files issues
+	if err := p.ops.StopClusterServices(); err != nil {
+		return fmt.Errorf("failed to stop cluster services: %w", err)
+	}
+
+	// Copy var with cp now that services are stopped
+	if err := p.copyVar(oldSRPath, newSRPath); err != nil {
+		// try to re-enable before returning
+		_ = p.ops.EnableClusterServices("")
 		return err
 	}
 
 	if err := p.copyEtc(oldDeploymentDir, newDeploymentDir); err != nil {
+		_ = p.ops.EnableClusterServices("")
 		return err
 	}
 
@@ -177,7 +183,13 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string
 	}
 
 	if err := p.copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymentName, newDeploymentName); err != nil {
+		_ = p.ops.EnableClusterServices("")
 		return err
+	}
+
+	// Enable kubelet back in the new stateroot (use --root)
+	if err := p.ops.EnableClusterServices(newSRPath); err != nil {
+		return fmt.Errorf("failed to enable kubelet in new stateroot: %w", err)
 	}
 
 	return nil
@@ -198,45 +210,19 @@ func (p *PrepareHandler) setDefaultDeploymentIfEnabled(newStateroot string) erro
 	return nil
 }
 
-// copyVarWithTar archives the var directory from old stateroot with excludes and restores it into the new stateroot.
-func (p *PrepareHandler) copyVarWithTar(oldSRPath, newSRPath string) error {
-	newVarParent := newSRPath
-
-	// Archive old stateroot var with excludes to avoid races, then extract into the new stateroot
-	tarPath := filepath.Join(newSRPath, "var.tgz")
-	excludePatterns := []string{
-		"*/.bash_history",
-		"var/tmp/*",
-		"var/log/*",
-		"var/lib/lca",
-		"var/lib/log/*",
-		"var/lib/cni/bin/*",
-		strings.TrimPrefix(common.ContainerStoragePath, "/") + "/*",
-		"var/lib/kubelet/pods/*",
-		strings.TrimPrefix(common.OvnIcEtcFolder, "/") + "/*",
+// copyVar copies the var directory preserving SELinux contexts and attributes
+func (p *PrepareHandler) copyVar(oldSRPath, newSRPath string) error {
+	// Copy var directory preserving SELinux contexts and attributes
+	if _, err := p.ops.RunInHostNamespace(
+		"bash", "-c",
+		fmt.Sprintf(
+			"cp -ar --preserve=context '%s/' '%s/'",
+			filepath.Join(oldSRPath, "var"),
+			newSRPath,
+		),
+	); err != nil {
+		return fmt.Errorf("failed to copy var: %w", err)
 	}
-
-	// Build tar args: tar czf <tarPath> --exclude ... -C <oldSRPath> var <TarOpts> --ignore-failed-read
-	tarArgs := []string{"czf", tarPath}
-	for _, pattern := range excludePatterns {
-		tarArgs = append(tarArgs, "--exclude", pattern)
-	}
-	tarArgs = append(tarArgs, "-C", oldSRPath, "var")
-	tarArgs = append(tarArgs, common.TarOpts...)
-	tarArgs = append(tarArgs, "--ignore-failed-read")
-
-	if _, err := p.ops.RunInHostNamespace("tar", tarArgs...); err != nil {
-		return fmt.Errorf("failed to archive var directory: %w", err)
-	}
-
-	if err := p.ops.ExtractTarWithSELinux(tarPath, newVarParent); err != nil {
-		return fmt.Errorf("failed to extract var archive: %w", err)
-	}
-
-	if _, err := p.ops.RunInHostNamespace("rm", "-f", tarPath); err != nil {
-		p.log.Warnf("failed to remove temporary var archive %s: %v", tarPath, err)
-	}
-
 	return nil
 }
 
@@ -317,3 +303,6 @@ func sanitizeForOsname(s string) string {
 	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
 	return re.ReplaceAllString(s, "-")
 }
+
+// writeIPConfigPrepareStatus writes current status to the prepare status file.
+// status write/finalize handled by CLI layer for prepare

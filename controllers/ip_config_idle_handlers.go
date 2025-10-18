@@ -8,7 +8,6 @@ import (
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
-	"github.com/openshift-kni/lifecycle-agent/internal/prep"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -46,23 +45,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		}
 	}
 
-	if err := prep.DeleteIPConfigPrepareJob(ctx, r.Client, logger); err != nil {
-		reason := controllerutils.ConditionReasons.FinalizeFailed
-		if abortRequested && !finalizeRequested {
-			reason = controllerutils.ConditionReasons.AbortFailed
-		}
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			reason,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to clean up ip-config prepare job: %v", err),
-			ipc.Generation,
-		)
-		if err := r.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-		return requeueWithLongInterval(), nil
-	}
+	// No k8s job cleanup needed anymore; prepare runs via systemd unit now
 
 	if err := r.Ops.RemountSysroot(); err != nil {
 		reason := controllerutils.ConditionReasons.FinalizeFailed
