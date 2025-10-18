@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -108,7 +109,17 @@ func runIPConfigPrepare() error {
 		return err
 	}
 
-	if err := common.FinalizeIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunPhaseSucceeded, "ip-config prepare completed successfully; scheduling reboot"); err != nil {
+	newStaterootName, err := preparer.BuildStaterootName(newIPv4, newIPv6)
+	if err != nil {
+		return fmt.Errorf("failed to build stateroot name: %w", err)
+	}
+	staterootPath := common.GetStaterootPath(newStaterootName)
+	statusFilePath := filepath.Join(staterootPath, common.IPConfigPrepareStatusFile)
+	if err := common.FinalizeIPConfigStatus(
+		statusFilePath,
+		common.IPConfigRunPhaseSucceeded,
+		"ip-config prepare completed successfully",
+	); err != nil {
 		return fmt.Errorf("failed to mark prepare as successful: %w", err)
 	}
 

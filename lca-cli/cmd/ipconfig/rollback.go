@@ -19,6 +19,7 @@ package ipconfigcmd
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
@@ -66,6 +67,43 @@ func runIPConfigRollback() error {
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
 
 	rb := reboot.NewRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
+
+	// Write initial rollback status
+	if err := common.WriteIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunStatus{
+		Phase:     common.IPConfigRunPhaseRunning,
+		Message:   "ip-config rollback started",
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return fmt.Errorf("failed to write initial rollback status: %w", err)
+	}
+
 	exec := ipconfig.NewRollbackHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rb)
-	return exec.RunRollback(rollbackStateroot)
+	if err := exec.RunRollback(rollbackStateroot); err != nil {
+		internalErr := common.FinalizeIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunPhaseFailed, fmt.Sprintf("ip-config rollback failed: %v", err))
+		if internalErr != nil {
+			return fmt.Errorf("failed to finalize IP config rollback status: %w", internalErr)
+		}
+		return err
+	}
+
+	if err := common.FinalizeIPConfigStatus(
+		common.IPConfigRollbackStatusFile,
+		common.IPConfigRunPhaseSucceeded,
+		"ip-config rollback completed successfully",
+	); err != nil {
+		return fmt.Errorf("failed to mark rollback as successful: %w", err)
+	}
+
+	// Schedule reboot on the host namespace
+	hostExec := ops.NewNsenterExecutor(pkgLog, true)
+	if _, err := hostExec.Execute(
+		"systemd-run",
+		"--unit", "lca-ipconfig-rollback-reboot",
+		"--description", "lifecycle-agent: ip-config rollback reboot",
+		"systemctl", "reboot",
+	); err != nil {
+		return fmt.Errorf("failed to schedule reboot: %w", err)
+	}
+
+	return nil
 }

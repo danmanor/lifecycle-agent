@@ -33,31 +33,48 @@ func NewPrepareHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClient
 	return &PrepareHandler{log: log, ops: ops, ostree: ostree, rpm: rpm, reboot: reboot, k8s: k8s}
 }
 
-func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) error {
+func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) (err error) {
 	p.log.Infof("IP config prepare started with IPv4: %s and IPv6: %s", newIPv4, newIPv6)
 
-	newStateroot, err := p.buildStaterootName(newIPv4, newIPv6)
+	newStateroot, err := p.BuildStaterootName(newIPv4, newIPv6)
 	if err != nil {
-		return err
+		return
 	}
 
-	if err := p.ensureSysrootWritable(); err != nil {
-		return err
+	if err = p.ensureSysrootWritable(); err != nil {
+		return
 	}
 
 	kargs, err := fetchCurrentKernelArgs()
 	if err != nil {
-		return fmt.Errorf("failed to get current kernel args: %w", err)
+		err = fmt.Errorf("failed to get current kernel args: %w", err)
+		return
 	}
 
 	currentStateroot, bootedCommit, err := p.getCurrentStaterootAndBootedCommit()
 	if err != nil {
-		return err
+		return
 	}
 
-	if err := p.deployNewStateroot(newStateroot, bootedCommit, kargs); err != nil {
-		return err
+	if err = p.deployNewStateroot(newStateroot, bootedCommit, kargs); err != nil {
+		return
 	}
+
+	if err = p.ops.StopClusterServices(); err != nil {
+		err = fmt.Errorf("failed to stop cluster services: %w", err)
+		return
+	}
+
+	var rootDirForClusterServices string
+	defer func() {
+		if internalErr := p.ops.EnableClusterServices(rootDirForClusterServices); internalErr != nil {
+			if err == nil {
+				err = internalErr
+			} else {
+				err = fmt.Errorf("%v; also failed to enable cluster services: %w", err, internalErr)
+			}
+		}
+	}()
 
 	if err := p.copyStateRootData(currentStateroot, newStateroot); err != nil {
 		return err
@@ -67,11 +84,19 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		return err
 	}
 
+	newDeploymentDir, err := p.ostree.GetDeploymentDir(newStateroot)
+	if err != nil {
+		err = fmt.Errorf("failed to get deployment dir for %s: %w", newStateroot, err)
+		return
+	}
+	rootDirForClusterServices = newDeploymentDir
+
 	p.log.Info("IP config prepare done successfully")
+
 	return nil
 }
 
-func (p *PrepareHandler) buildStaterootName(newIPv4, newIPv6 string) (string, error) {
+func (p *PrepareHandler) BuildStaterootName(newIPv4, newIPv6 string) (string, error) {
 	nameParts := []string{"rhcos"}
 	if newIPv4 != "" {
 		nameParts = append(nameParts, sanitizeForOsname(newIPv4))
@@ -156,20 +181,11 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string
 		return fmt.Errorf("failed to create deployment dir for %s: %w", newStateroot, err)
 	}
 
-	// Stop cluster services to avoid races and dynamically-written files issues
-	if err := p.ops.StopClusterServices(); err != nil {
-		return fmt.Errorf("failed to stop cluster services: %w", err)
-	}
-
-	// Copy var with cp now that services are stopped
 	if err := p.copyVar(oldSRPath, newSRPath); err != nil {
-		// try to re-enable before returning
-		_ = p.ops.EnableClusterServices("")
 		return err
 	}
 
 	if err := p.copyEtc(oldDeploymentDir, newDeploymentDir); err != nil {
-		_ = p.ops.EnableClusterServices("")
 		return err
 	}
 
@@ -183,13 +199,11 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string
 	}
 
 	if err := p.copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymentName, newDeploymentName); err != nil {
-		_ = p.ops.EnableClusterServices("")
+		internalErr := p.ops.EnableClusterServices("")
+		if internalErr != nil {
+			return fmt.Errorf("failed to enable cluster services: %w", internalErr)
+		}
 		return err
-	}
-
-	// Enable kubelet back in the new stateroot (use --root)
-	if err := p.ops.EnableClusterServices(newSRPath); err != nil {
-		return fmt.Errorf("failed to enable kubelet in new stateroot: %w", err)
 	}
 
 	return nil

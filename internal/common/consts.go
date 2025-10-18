@@ -72,10 +72,11 @@ const (
 	LvmDevicesPath                    = "/etc/lvm/devices/system.devices"
 	CABundleFilePath                  = "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
 
-	LCAConfigDir              = "/var/lib/lca"
-	IPConfigRunFlagsFile      = LCAConfigDir + "/ip-config-run.json"
-	IPConfigRunStatusFile     = LCAConfigDir + "/ip-config-run-status.json"
-	IPConfigPrepareStatusFile = LCAConfigDir + "/ip-config-prepare-status.json"
+	LCAConfigDir               = "/var/lib/lca"
+	IPConfigRunFlagsFile       = LCAConfigDir + "/ip-config-run.json"
+	IPConfigRunStatusFile      = LCAConfigDir + "/ip-config-run-status.json"
+	IPConfigPrepareStatusFile  = LCAConfigDir + "/ip-config-prepare-status.json"
+	IPConfigRollbackStatusFile = LCAConfigDir + "/ip-config-rollback-status.json"
 
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800

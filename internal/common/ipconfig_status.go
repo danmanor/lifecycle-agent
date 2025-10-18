@@ -4,15 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 // WriteIPConfigStatus writes the given status struct to the provided file path.
 func WriteIPConfigStatus(filePath string, st IPConfigRunStatus) error {
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
 	data, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
+
 	return os.WriteFile(filePath, data, 0o600)
 }
 

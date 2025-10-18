@@ -7,7 +7,6 @@ import (
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
-	"github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
@@ -110,7 +109,7 @@ func (p *IPConfigPrepareHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConf
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	phase, message, err := common.ReadIPConfigStatus(common.IPConfigPrepareStatusFile)
+	phase, message, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigPrepareStatusFile))
 	if err != nil {
 		return requeueWithError(fmt.Errorf("failed to read ip-config prepare status: %w", err))
 	}
@@ -131,7 +130,7 @@ func (p *IPConfigPrepareHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConf
 
 func (p *IPConfigPrepareHandler) handlePrepareUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
 	ipv4Addr, ipv6Addr := getIPAddresses(ipc)
-	if err := utils.CopyLcaCliToHost(logger); err != nil {
+	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
 		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
 			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Prepare),
 			controllerutils.ConditionReasons.Failed,

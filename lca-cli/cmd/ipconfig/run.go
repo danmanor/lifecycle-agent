@@ -168,7 +168,7 @@ func runIPConfigChange() error {
 	if err := common.FinalizeIPConfigStatus(
 		common.IPConfigRunStatusFile,
 		common.IPConfigRunPhaseSucceeded,
-		"ip-config run completed successfully; scheduling reboot",
+		"ip-config run completed successfully",
 	); err != nil {
 		return fmt.Errorf("failed to mark IP config run as successful: %w", err)
 	}

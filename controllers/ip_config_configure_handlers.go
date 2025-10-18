@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
-	"github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
@@ -77,7 +76,7 @@ func (c *IPConfigConfigureHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCo
 		return doNotRequeue(), fmt.Errorf("failed to write ip-config run config: %w", err)
 	}
 
-	if err := utils.CopyLcaCliToHost(logger); err != nil {
+	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
 		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
 			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
 			controllerutils.ConditionReasons.Failed,
@@ -353,7 +352,7 @@ func (r *IPConfigReconciler) handleConfigure(
 	logger := log.FromContext(ctx).WithName("IPConfigConfigure")
 	logger.Info("Starting handleConfigure")
 
-	phase, message, err := common.ReadIPConfigStatus(common.IPConfigRunStatusFile)
+	phase, message, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigRunStatusFile))
 	if err != nil {
 		return requeueWithError(fmt.Errorf("failed to read ip-config run status: %w", err))
 	}
