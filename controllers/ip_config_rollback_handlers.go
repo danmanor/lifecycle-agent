@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
@@ -11,7 +12,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	lcautils "github.com/openshift-kni/lifecycle-agent/utils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -56,20 +57,7 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 
 	stateroot, err := r.RPMOstreeClient.GetUnbootedStaterootName()
 	if err != nil {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			controllerutils.RollbackFailed+": "+err.Error(),
-			ipc.Generation,
-		)
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			controllerutils.RollbackFailed+": "+err.Error(),
-			ipc.Generation,
-		)
+		controllerutils.SetIPRollbackStatusFailed(ipc, controllerutils.RollbackFailed+": "+err.Error())
 
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -78,36 +66,27 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 		return requeueWithError(fmt.Errorf("failed to determine unbooted stateroot: %w", err))
 	}
 
-	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()),
-			ipc.Generation,
-		)
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()),
-			ipc.Generation,
-		)
+	logger.Info("Save the IPConfig CR to the old state root before pivot")
+	ipcsavePath := common.PathOutsideChroot(filepath.Join(common.GetStaterootPath(stateroot), controllerutils.IPCFilePath))
+	if err := lcautils.MarshalToFile(ipc, ipcsavePath); err != nil {
+		controllerutils.SetIPRollbackStatusFailed(ipc, controllerutils.RollbackFailed+": "+err.Error())
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
-		return doNotRequeue(), fmt.Errorf("failed to copy lca-cli binary: %w", err)
+		return requeueWithError(fmt.Errorf("failed to save IPConfig CR before pivot: %w", err))
+	}
+
+	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
+		controllerutils.SetIPRollbackStatusFailed(ipc, fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()))
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
 	}
 
 	logger.Info("Scheduling lca-cli ip-config rollback via systemd-run", "stateroot", stateroot)
 
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.InProgress,
-		metav1.ConditionTrue,
-		"IP configuration rollback is in progress",
-		ipc.Generation,
-	)
+	controllerutils.SetIPRollbackStatusInProgress(ipc, "IP configuration rollback is in progress")
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
@@ -120,20 +99,7 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 		"--stateroot", stateroot,
 	}
 	if _, err := r.Executor.Execute("systemd-run", args...); err != nil {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			controllerutils.RollbackFailed+": "+err.Error(),
-			ipc.Generation,
-		)
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.Failed,
-			metav1.ConditionFalse,
-			controllerutils.RollbackFailed+": "+err.Error(),
-			ipc.Generation,
-		)
+		controllerutils.SetIPRollbackStatusFailed(ipc, controllerutils.RollbackFailed+": "+err.Error())
 
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -148,13 +114,7 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 func (r *IPConfigRollbackHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Starting health check after rollback")
 	if err := CheckHealth(ctx, r.NoncachedClient, log.FromContext(ctx)); err != nil {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-			controllerutils.ConditionReasons.InProgress,
-			metav1.ConditionTrue,
-			fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()),
-			ipc.Generation,
-		)
+		controllerutils.SetIPRollbackStatusInProgress(ipc, fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()))
 
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -163,20 +123,7 @@ func (r *IPConfigRollbackHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPCo
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Completed,
-		metav1.ConditionFalse,
-		controllerutils.RollbackCompleted,
-		ipc.Generation,
-	)
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Completed,
-		metav1.ConditionTrue,
-		controllerutils.RollbackCompleted,
-		ipc.Generation,
-	)
+	controllerutils.SetIPRollbackStatusCompleted(ipc, controllerutils.RollbackCompleted)
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -216,20 +163,7 @@ func (r *IPConfigReconciler) handleRollback(ctx context.Context, ipc *ipcv1.IPCo
 		return result, fmt.Errorf("failed to run post pivot: %w", err)
 	}
 
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Completed,
-		metav1.ConditionFalse,
-		"Rollback completed",
-		ipc.Generation,
-	)
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Completed,
-		metav1.ConditionTrue,
-		"Rollback completed",
-		ipc.Generation,
-	)
+	controllerutils.SetIPRollbackStatusCompleted(ipc, "Rollback completed")
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -252,20 +186,7 @@ func (r *IPConfigReconciler) handleRollbackRunning(logger logr.Logger) (ctrl.Res
 }
 
 func (r *IPConfigReconciler) handleRollbackFailed(ctx context.Context, ipc *ipcv1.IPConfig, message string) (ctrl.Result, error) {
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Failed,
-		metav1.ConditionFalse,
-		fmt.Sprintf("ip-config rollback failed: %s", message),
-		ipc.Generation,
-	)
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.Failed,
-		metav1.ConditionFalse,
-		fmt.Sprintf("ip-config rollback failed: %s", message),
-		ipc.Generation,
-	)
+	controllerutils.SetIPRollbackStatusFailed(ipc, fmt.Sprintf("ip-config rollback failed: %s", message))
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
@@ -273,13 +194,7 @@ func (r *IPConfigReconciler) handleRollbackFailed(ctx context.Context, ipc *ipcv
 }
 
 func (r *IPConfigReconciler) handleRollbackSucceeded(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
-	controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
-		controllerutils.ConditionReasons.InProgress,
-		metav1.ConditionTrue,
-		"ip-config rollback completed",
-		ipc.Generation,
-	)
+	controllerutils.SetIPRollbackStatusInProgress(ipc, "ip-config rollback completed")
 
 	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
 	if err != nil {

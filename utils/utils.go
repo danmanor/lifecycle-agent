@@ -324,7 +324,40 @@ func InitIBU(ctx context.Context, c client.Client, log *logr.Logger) error {
 }
 
 func InitIPConfig(ctx context.Context, c client.Client, log *logr.Logger) error {
-	ipc := &ipcv1.IPConfig{
+	savedIPCPath := common.PathOutsideChroot(utils.IPCFilePath)
+	restored := false
+	ipc := &ipcv1.IPConfig{}
+	if err := ReadYamlOrJSONFile(savedIPCPath, ipc); err == nil {
+		ipc.SetResourceVersion("")
+		log.Info("Saved IPConfig CR found, restoring ...")
+		if err := c.Delete(ctx, ipc); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete IPConfig during restore: %w", err)
+			}
+		}
+
+		status := ipc.Status
+		if err := c.Create(ctx, ipc); err != nil {
+			return fmt.Errorf("failed to create IPConfig to restore: %w", err)
+		}
+		ipc.Status = status
+		if err := c.Status().Update(ctx, ipc); err != nil {
+			return fmt.Errorf("failed to update IPConfig during restore: %w", err)
+		}
+		if err := os.Remove(savedIPCPath); err != nil {
+			return fmt.Errorf("failed to remove IPC in %s: %w", savedIPCPath, err)
+		}
+		log.Info("Restore successful and saved IPConfig CR removed")
+		restored = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if restored {
+		return nil
+	}
+
+	ipc = &ipcv1.IPConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: common.IPConfigName},
 		Spec:       ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Idle},
 	}

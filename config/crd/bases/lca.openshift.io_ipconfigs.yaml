@@ -108,15 +108,14 @@ spec:
                   namespace containing .dockerconfigjson
                 type: string
               recertImage:
-                description: Recert image for certificate rotation during configure
-                  stage
+                description: Recert image for certificate rotation during config stage
                 type: string
               stage:
                 description: IPConfigStage defines the type for the stage field
                 enum:
                 - Idle
-                - Prepare
-                - Configure
+                - Prep
+                - Config
                 - Rollback
                 type: string
               vlan:

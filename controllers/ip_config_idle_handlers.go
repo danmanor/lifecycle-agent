@@ -22,32 +22,26 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 
 	finalizeRequested, abortRequested := r.computeIdleIntent(ipc)
 
-	// If we need to finalize, ensure the system is healthy/stable first
 	if res, requeue, err := r.ensureFinalizationHealthOrWait(ctx, logger, ipc, finalizeRequested); requeue {
 		return res, err
 	}
 
-	// Remount sysroot to ensure write access for follow-up operations
 	if res, requeue, err := r.remountSysrootOrError(ipc, abortRequested, finalizeRequested); requeue {
 		return res, err
 	}
 
-	// Clean up unbooted stateroots and orphaned boot directories
 	if res, requeue, err := r.cleanupStaterootsOrRequeue(ctx, logger, ipc, abortRequested, finalizeRequested); requeue {
 		return res, err
 	}
 
-	// Remove temporary lca-cli copy on the host (if exists)
 	if res, requeue, err := r.removeHostLcaCliOrRequeue(ctx, ipc); requeue {
 		return res, err
 	}
 
-	// Cleanup IPConfig workspace/files
 	if res, requeue, err := r.cleanupWorkspaceOrRequeue(ctx, ipc, abortRequested, finalizeRequested); requeue {
 		return res, err
 	}
 
-	// Reset conditions, compute next stages and persist status
 	return r.resetStatusAndSetValidNextStages(ctx, ipc)
 }
 
@@ -55,8 +49,8 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 // and whether an abort was requested (prepare/configure in-progress without finalize).
 func (r *IPConfigReconciler) computeIdleIntent(ipc *ipcv1.IPConfig) (bool, bool) {
 	isAfterPivot := isTargetStaterootBooted(ipc, r.RPMOstreeClient)
-	prepCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Prepare)
-	confCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Configure)
+	prepCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Prep)
+	confCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Config)
 
 	finalizeRequested := isAfterPivot ||
 		(confCond != nil &&
@@ -81,13 +75,7 @@ func (r *IPConfigReconciler) ensureFinalizationHealthOrWait(
 	logger.Info("Idle requested for finalize; running health checks")
 	if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
 		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			controllerutils.ConditionReasons.Finalizing,
-			metav1.ConditionFalse,
-			msg,
-			ipc.Generation,
-		)
+		controllerutils.SetIPIdleStatusInProgress(ipc, controllerutils.ConditionReasons.Finalizing, msg)
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			return res, true, ierr
@@ -108,13 +96,7 @@ func (r *IPConfigReconciler) remountSysrootOrError(
 		if abortRequested && !finalizeRequested {
 			reason = controllerutils.ConditionReasons.AbortFailed
 		}
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			reason,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to remount sysroot: %v", err),
-			ipc.Generation,
-		)
+		controllerutils.SetIPIdleStatusInProgress(ipc, reason, fmt.Sprintf("failed to remount sysroot: %v", err))
 		res, ierr := requeueWithError(fmt.Errorf("failed to remount sysroot: %w", err))
 		return res, true, ierr
 	}
@@ -135,13 +117,7 @@ func (r *IPConfigReconciler) cleanupStaterootsOrRequeue(
 		if abortRequested && !finalizeRequested {
 			reason = controllerutils.ConditionReasons.AbortFailed
 		}
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			reason,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to clean up unbooted stateroots: %v", err),
-			ipc.Generation,
-		)
+		controllerutils.SetIPIdleStatusInProgress(ipc, reason, fmt.Sprintf("failed to clean up unbooted stateroots: %v", err))
 
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -150,6 +126,7 @@ func (r *IPConfigReconciler) cleanupStaterootsOrRequeue(
 
 		return requeueWithLongInterval(), true, nil
 	}
+
 	return ctrl.Result{}, false, nil
 }
 
@@ -161,13 +138,7 @@ func (r *IPConfigReconciler) removeHostLcaCliOrRequeue(
 ) (ctrl.Result, bool, error) {
 	lcaHostCopy := common.PathOutsideChroot("/var/usrlocal/bin/lca-cli")
 	if err := os.Remove(lcaHostCopy); err != nil && !os.IsNotExist(err) {
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			controllerutils.ConditionReasons.FinalizeFailed,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to remove temporary lca-cli host copy: %v", err),
-			ipc.Generation,
-		)
+		controllerutils.SetIPIdleStatusInProgress(ipc, controllerutils.ConditionReasons.FinalizeFailed, fmt.Sprintf("failed to remove temporary lca-cli host copy: %v", err))
 
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -192,13 +163,7 @@ func (r *IPConfigReconciler) cleanupWorkspaceOrRequeue(
 		if abortRequested && !finalizeRequested {
 			reason = controllerutils.ConditionReasons.AbortFailed
 		}
-		controllerutils.SetStatusCondition(&ipc.Status.Conditions,
-			controllerutils.ConditionTypes.Idle,
-			reason,
-			metav1.ConditionFalse,
-			fmt.Sprintf("failed to cleanup workspace: %v", err),
-			ipc.Generation,
-		)
+		controllerutils.SetIPIdleStatusInProgress(ipc, reason, fmt.Sprintf("failed to cleanup workspace: %v", err))
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			return res, true, ierr
@@ -235,14 +200,6 @@ func cleanupIPConfigFiles() error {
 }
 
 func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error {
-	if err := CleanupUnbootedStateroots(logger, r.Ops, r.OstreeClient, r.RPMOstreeClient); err != nil {
-		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
-	}
-
-	if err := r.Ops.RemountBoot(); err != nil {
-		return fmt.Errorf("failed to remount boot: %w", err)
-	}
-
 	bootDirsToRemove, err := getBootDirectoriesToRemove(r.RPMOstreeClient)
 	if err != nil {
 		return fmt.Errorf("failed to determine boot directories to remove: %w", err)
@@ -253,6 +210,14 @@ func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error
 		if err := os.RemoveAll(dirPath); err != nil {
 			return fmt.Errorf("failed to remove boot directory %s: %w", dirPath, err)
 		}
+	}
+
+	if err := CleanupUnbootedStateroots(logger, r.Ops, r.OstreeClient, r.RPMOstreeClient); err != nil {
+		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
+	}
+
+	if err := r.Ops.RemountBoot(); err != nil {
+		return fmt.Errorf("failed to remount boot: %w", err)
 	}
 
 	return nil

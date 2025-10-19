@@ -52,15 +52,15 @@ type IPConfigList struct {
 type IPConfigStage string
 
 var IPStages = struct {
-	Idle      IPConfigStage
-	Prepare   IPConfigStage
-	Configure IPConfigStage
-	Rollback  IPConfigStage
+	Idle     IPConfigStage
+	Prep     IPConfigStage
+	Config   IPConfigStage
+	Rollback IPConfigStage
 }{
-	Idle:      "Idle",
-	Prepare:   "Prepare",
-	Configure: "Configure",
-	Rollback:  "Rollback",
+	Idle:     "Idle",
+	Prep:     "Prep",
+	Config:   "Config",
+	Rollback: "Rollback",
 }
 
 // IPFamilyConfig represents a single stack configuration
@@ -89,7 +89,7 @@ type ProxyConfig struct {
 
 // IPConfigSpec defines the desired state of IPConfig
 type IPConfigSpec struct {
-	// +kubebuilder:validation:Enum=Idle;Prepare;Configure;Rollback
+	// +kubebuilder:validation:Enum=Idle;Prep;Config;Rollback
 	Stage IPConfigStage `json:"stage,omitempty"`
 
 	// pullSecretRef is the name of a Secret in the openshift-config namespace containing .dockerconfigjson
@@ -107,7 +107,7 @@ type IPConfigSpec struct {
 	// Optional proxy settings
 	Proxy *ProxyConfig `json:"proxy,omitempty"`
 
-	// Recert image for certificate rotation during configure stage
+	// Recert image for certificate rotation during config stage
 	RecertImage string `json:"recertImage,omitempty"`
 }
 

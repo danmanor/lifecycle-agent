@@ -195,10 +195,7 @@ func IsStageFailed(ibu *ibuv1.ImageBasedUpgrade, stage ibuv1.ImageBasedUpgradeSt
 // IsStageCompletedOrFailed checks if the completed condition for the stage is present
 func IsStageCompletedOrFailed(ibu *ibuv1.ImageBasedUpgrade, stage ibuv1.ImageBasedUpgradeStage) bool {
 	condition := GetCompletedCondition(ibu, stage)
-	if condition != nil {
-		return true
-	}
-	return false
+	return condition != nil
 }
 
 // IsStageInProgress checks if ibu is working on the stage
@@ -288,12 +285,14 @@ func GetCompletedConditionType(stage ibuv1.ImageBasedUpgradeStage) (conditionTyp
 	return
 }
 
-// GetIPInProgressConditionType returns the IPConfig in-progress condition type based on the stage (Idle excluded)
+// GetIPInProgressConditionType returns the IPConfig in-progress condition type based on the stage
 func GetIPInProgressConditionType(stage ipcv1.IPConfigStage) (conditionType ConditionType) {
 	switch stage {
-	case ipcv1.IPStages.Prepare:
+	case ipcv1.IPStages.Idle:
+		conditionType = ConditionTypes.Idle
+	case ipcv1.IPStages.Prep:
 		conditionType = ConditionTypes.IPPrepareInProgress
-	case ipcv1.IPStages.Configure:
+	case ipcv1.IPStages.Config:
 		conditionType = ConditionTypes.IPConfigureInProgress
 	case ipcv1.IPStages.Rollback:
 		conditionType = ConditionTypes.IPRollbackInProgress
@@ -301,12 +300,14 @@ func GetIPInProgressConditionType(stage ipcv1.IPConfigStage) (conditionType Cond
 	return
 }
 
-// GetIPCompletedConditionType returns the IPConfig completed condition type based on the stage (Idle excluded)
+// GetIPCompletedConditionType returns the IPConfig completed condition type based on the stage
 func GetIPCompletedConditionType(stage ipcv1.IPConfigStage) (conditionType ConditionType) {
 	switch stage {
-	case ipcv1.IPStages.Prepare:
+	case ipcv1.IPStages.Idle:
+		conditionType = ConditionTypes.Idle
+	case ipcv1.IPStages.Prep:
 		conditionType = ConditionTypes.IPPrepareCompleted
-	case ipcv1.IPStages.Configure:
+	case ipcv1.IPStages.Config:
 		conditionType = ConditionTypes.IPConfigureCompleted
 	case ipcv1.IPStages.Rollback:
 		conditionType = ConditionTypes.IPRollbackCompleted
@@ -496,6 +497,17 @@ func SetIdleStatusInProgress(ibu *ibuv1.ImageBasedUpgrade, reason ConditionReaso
 	)
 }
 
+// SetIPIdleStatusInProgress updates the IPConfig Idle status to in progress with message
+func SetIPIdleStatusInProgress(ipc *ipcv1.IPConfig, reason ConditionReason, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		ConditionTypes.Idle,
+		reason,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation,
+	)
+}
+
 func UpdateIBUStatus(ctx context.Context, c client.Client, ibu *ibuv1.ImageBasedUpgrade) error {
 	if c == nil {
 		// In UT code
@@ -514,6 +526,248 @@ func UpdateIBUStatus(ctx context.Context, c client.Client, ibu *ibuv1.ImageBased
 
 	if err := c.Status().Update(ctx, ibu); err != nil {
 		return fmt.Errorf("failed to update IBU status: %w", err)
+	}
+
+	return nil
+}
+
+// IsIPStageCompleted checks if the completed condition status for the IPConfig stage is true
+func IsIPStageCompleted(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) bool {
+	condition := GetIPCompletedCondition(ipc, stage)
+	if condition != nil && condition.Status == metav1.ConditionTrue {
+		return true
+	}
+	return false
+}
+
+// IsIPStageFailed checks if the completed condition status for the IPConfig stage is false
+func IsIPStageFailed(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) bool {
+	condition := GetIPCompletedCondition(ipc, stage)
+	if condition != nil && condition.Status == metav1.ConditionFalse {
+		return true
+	}
+	return false
+}
+
+// IsIPStageCompletedOrFailed checks if the completed condition for the IPConfig stage is present
+func IsIPStageCompletedOrFailed(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) bool {
+	condition := GetIPCompletedCondition(ipc, stage)
+	return condition != nil
+}
+
+// IsIPStageInProgress checks if IPConfig is working on the stage
+func IsIPStageInProgress(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) bool {
+	condition := GetIPInProgressCondition(ipc, stage)
+	if stage == ipcv1.IPStages.Idle {
+		if condition == nil || condition.Status == metav1.ConditionTrue {
+			return false
+		}
+
+		switch condition.Reason {
+		case string(ConditionReasons.Aborting),
+			string(ConditionReasons.AbortFailed),
+			string(ConditionReasons.Finalizing),
+			string(ConditionReasons.FinalizeFailed),
+			string(ConditionReasons.InvalidTransition):
+			return true
+		}
+
+		return false
+	}
+
+	if condition != nil && condition.Status == metav1.ConditionTrue {
+		return true
+	}
+	return false
+}
+
+// GetIPInProgressStage returns the IPConfig stage that is currently in progress
+func GetIPInProgressStage(ipc *ipcv1.IPConfig) ipcv1.IPConfigStage {
+	stages := []ipcv1.IPConfigStage{
+		ipcv1.IPStages.Idle,
+		ipcv1.IPStages.Prep,
+		ipcv1.IPStages.Config,
+		ipcv1.IPStages.Rollback,
+	}
+
+	for _, stage := range stages {
+		if IsIPStageInProgress(ipc, stage) {
+			return stage
+		}
+	}
+
+	return ""
+}
+
+// ClearIPInvalidTransitionStatusConditions clears any invalid transitions for IPConfig if exist
+func ClearIPInvalidTransitionStatusConditions(ipc *ipcv1.IPConfig) {
+	for _, condition := range ipc.Status.Conditions {
+		if condition.Reason == string(ConditionReasons.InvalidTransition) {
+			meta.RemoveStatusCondition(&ipc.Status.Conditions, condition.Type)
+		}
+	}
+}
+
+// SetIPStatusInvalidTransition updates the given IP stage status to invalid transition with message
+func SetIPStatusInvalidTransition(ipc *ipcv1.IPConfig, msg string) {
+	ct := GetIPInProgressConditionType(ipc.Spec.Stage)
+	if ct == "" {
+		return
+	}
+	SetStatusCondition(&ipc.Status.Conditions,
+		ct,
+		ConditionReasons.InvalidTransition,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation,
+	)
+}
+
+// SetIPPrepStatusInProgress updates the IP Prep status to in progress with message
+func SetIPPrepStatusInProgress(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
+		ConditionReasons.InProgress,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPPrepStatusFailed updates the IP Prep status to failed with message
+func SetIPPrepStatusFailed(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Prep),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPPrepStatusCompleted updates the IP Prep status to completed
+func SetIPPrepStatusCompleted(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
+		ConditionReasons.Completed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Prep),
+		ConditionReasons.Completed,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPConfigStatusInProgress updates the IP Config status to in progress with message
+func SetIPConfigStatusInProgress(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Config),
+		ConditionReasons.InProgress,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPConfigStatusFailed updates the IP Config status to failed with message
+func SetIPConfigStatusFailed(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Config),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Config),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPConfigStatusCompleted updates the IP Config status to completed
+func SetIPConfigStatusCompleted(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Config),
+		ConditionReasons.Completed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Config),
+		ConditionReasons.Completed,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPRollbackStatusInProgress updates the IP Rollback status to in progress with message
+func SetIPRollbackStatusInProgress(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
+		ConditionReasons.InProgress,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPRollbackStatusFailed updates the IP Rollback status to failed with message
+func SetIPRollbackStatusFailed(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
+		ConditionReasons.Failed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+}
+
+// SetIPRollbackStatusCompleted updates the IP Rollback status to completed
+func SetIPRollbackStatusCompleted(ipc *ipcv1.IPConfig, msg string) {
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPInProgressConditionType(ipcv1.IPStages.Rollback),
+		ConditionReasons.Completed,
+		metav1.ConditionFalse,
+		msg,
+		ipc.Generation)
+	SetStatusCondition(&ipc.Status.Conditions,
+		GetIPCompletedConditionType(ipcv1.IPStages.Rollback),
+		ConditionReasons.Completed,
+		metav1.ConditionTrue,
+		msg,
+		ipc.Generation)
+}
+
+// UpdateIPStatus updates IPConfig status and observed generations consistently
+func UpdateIPStatus(ctx context.Context, c client.Client, ipc *ipcv1.IPConfig) error {
+	if c == nil {
+		// In UT code
+		return nil
+	}
+
+	ipc.Status.ObservedGeneration = ipc.ObjectMeta.Generation
+
+	for i := range ipc.Status.Conditions {
+		condition := &ipc.Status.Conditions[i]
+		if condition.Type == string(GetIPCompletedConditionType(ipc.Spec.Stage)) ||
+			condition.Type == string(GetIPInProgressConditionType(ipc.Spec.Stage)) {
+			condition.ObservedGeneration = ipc.ObjectMeta.Generation
+		}
+	}
+
+	if err := c.Status().Update(ctx, ipc); err != nil {
+		return fmt.Errorf("failed to update IPConfig status: %w", err)
 	}
 
 	return nil

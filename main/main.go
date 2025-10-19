@@ -322,7 +322,7 @@ func main() {
 		OstreeClient:    ostreeClient,
 		RPMOstreeClient: rpmOstreeClient,
 		Mux:             mux,
-		PrepareHandler: controllers.NewIPConfigPrepareHandler(
+		PrepHandler: controllers.NewIPConfigPrepHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			executor,
@@ -331,7 +331,7 @@ func main() {
 			mgr.GetScheme(),
 			clientset,
 		),
-		ConfigureHandler: controllers.NewIPConfigConfigureHandler(
+		ConfigHandler: controllers.NewIPConfigConfigurationHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			executor,

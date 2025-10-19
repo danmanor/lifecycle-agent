@@ -12,7 +12,7 @@ configMapGenerator:
   name: manager-config
 images:
 - name: controller
-  newName: quay.io/dmanor/lca
-  newTag: ip-config-v33
+  newName: docker.io/danmanor/lca
+  newTag: ip-config-v37
 patches:
 - path: related-images/patch.yaml
