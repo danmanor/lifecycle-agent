@@ -102,7 +102,11 @@ func runIPConfigPrepare() error {
 	}
 
 	if err := preparer.RunPrepare(context.Background(), newIPv4, newIPv6); err != nil {
-		internalErr := common.FinalizeIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunPhaseFailed, fmt.Sprintf("ip-config prepare failed: %v", err))
+		internalErr := common.FinalizeIPConfigStatus(
+			common.IPConfigPrepareStatusFile,
+			common.IPConfigRunPhaseFailed,
+			fmt.Sprintf("ip-config prepare failed: %v", err),
+		)
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config prepare status: %w", internalErr)
 		}

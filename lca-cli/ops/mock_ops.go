@@ -274,6 +274,20 @@ func (mr *MockOpsMockRecorder) RecertFullFlow(recertContainerImage, authFile, co
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecertFullFlow", reflect.TypeOf((*MockOps)(nil).RecertFullFlow), varargs...)
 }
 
+// RemountBoot mocks base method.
+func (m *MockOps) RemountBoot() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RemountBoot")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RemountBoot indicates an expected call of RemountBoot.
+func (mr *MockOpsMockRecorder) RemountBoot() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemountBoot", reflect.TypeOf((*MockOps)(nil).RemountBoot))
+}
+
 // RemountSysroot mocks base method.
 func (m *MockOps) RemountSysroot() error {
 	m.ctrl.T.Helper()

@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	IBUWorkspacePath string = common.LCAConfigDir + "/workspace"
+	IBUWorkspacePath      string = common.LCAConfigDir + "/workspace"
+	IPConfigWorkspacePath string = common.LCAConfigDir + "/workspace"
 	// IBUName defines the valid name of the CR for the controller to reconcile
 	IBUName     string = "upgrade"
 	IBUFilePath string = common.LCAConfigDir + "/ibu.json"

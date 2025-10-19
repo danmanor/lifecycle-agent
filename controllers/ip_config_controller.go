@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -72,6 +71,18 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return requeueWithError(fmt.Errorf("failed to get or create IPConfig: %w", err))
 	}
 
+	// initial state
+	if len(ipc.Status.ValidNextStages) == 0 && ipc.Spec.Stage == ipcv1.IPStages.Idle {
+		ipc.Status.ValidNextStages = []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update IPConfig status: %w", err))
+		}
+	}
+
+	if err := r.validateIPConfigStage(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to validate IPConfig stage: %w", err))
+	}
+
 	if err := r.validateIBUIdle(ctx); err != nil {
 		return requeueWithError(fmt.Errorf("failed to validate IBU idle: %w", err))
 	}
@@ -82,7 +93,11 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
 	}
 
-	ipc.Status.ValidNextStages = validNextStages(ipc, r.RPMOstreeClient)
+	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
+	if err != nil {
+		return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
+	}
+	ipc.Status.ValidNextStages = validNextStages
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update IPConfig status: %w", err))
@@ -128,23 +143,39 @@ func refreshCurrentIPs(
 	return nil
 }
 
-func validNextStages(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclient.IClient) []ipcv1.IPConfigStage {
+func validNextStages(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclient.IClient) ([]ipcv1.IPConfigStage, error) {
 	switch ipc.Spec.Stage {
 	case ipcv1.IPStages.Idle:
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Prepare}
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Prepare}, nil
 	case ipcv1.IPStages.Prepare:
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Configure}
-	case ipcv1.IPStages.Configure:
 		isAfterPivot := isTargetStaterootBooted(ipc, rpmOstreeClient)
 		if isAfterPivot {
-			return []ipcv1.IPConfigStage{ipcv1.IPStages.Rollback}
+			return []ipcv1.IPConfigStage{ipcv1.IPStages.Rollback, ipcv1.IPStages.Configure}, nil
 		}
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}, nil
+	case ipcv1.IPStages.Configure:
+		isAfterSuccessfulConfiguration, err := isAfterSuccessfulConfiguration()
+		if err != nil {
+			return nil, err
+		}
+		if isAfterSuccessfulConfiguration {
+			return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle, ipcv1.IPStages.Rollback}, nil
+		}
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Rollback}, nil
 	case ipcv1.IPStages.Rollback:
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage)
 	}
+}
+
+func isAfterSuccessfulConfiguration() (bool, error) {
+	phase, _, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigRunStatusFile))
+	if err != nil {
+		return false, fmt.Errorf("failed to read ip-config run status: %w", err)
+	}
+
+	return phase == common.IPConfigRunPhaseSucceeded, nil
 }
 
 // getNewDeploymentDir returns the deployment dir for the unbooted/new stateroot prepared for ip-config
@@ -186,22 +217,17 @@ func isTargetStaterootBooted(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclien
 func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
 	parts := []string{"rhcos"}
 	if v := ipc.Spec.IPv4; v != nil && v.Address != "" {
-		parts = append(parts, sanitizeForOsname(strings.Split(v.Address, "/")[0]))
+		parts = append(parts, common.SanitizeForOsname(strings.Split(v.Address, "/")[0]))
 	}
 	if v := ipc.Spec.IPv6; v != nil && v.Address != "" {
 		addr := strings.Split(v.Address, "/")[0]
 		addr = strings.Trim(addr, "[]")
-		parts = append(parts, sanitizeForOsname(addr))
+		parts = append(parts, common.SanitizeForOsname(addr))
 	}
 	if len(parts) == 1 {
 		return ""
 	}
 	return strings.Join(parts, "_")
-}
-
-func sanitizeForOsname(s string) string {
-	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
-	return re.ReplaceAllString(s, "-")
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -267,6 +293,14 @@ func (r *IPConfigReconciler) validateIBUIdle(ctx context.Context) error {
 
 	if lo.FromPtr(ibuStage) != ibuv1.Stages.Idle {
 		return fmt.Errorf("IBU is not in Idle stage, current stage is %s", lo.FromPtr(ibuStage))
+	}
+
+	return nil
+}
+
+func (r *IPConfigReconciler) validateIPConfigStage(ctx context.Context, ipc *ipcv1.IPConfig) error {
+	if !lo.Contains(ipc.Status.ValidNextStages, ipc.Spec.Stage) {
+		return fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage)
 	}
 
 	return nil

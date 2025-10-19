@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"regexp"
 
 	"io"
 	"os"
@@ -208,4 +209,11 @@ func GenerateDeleteOptions() *client.DeleteOptions {
 		PropagationPolicy: &propagationPolicy,
 	}
 	return &delOpt
+}
+
+func SanitizeForOsname(s string) string {
+	s = strings.Trim(s, "[]")
+	s = strings.Split(s, "/")[0]
+	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
+	return re.ReplaceAllString(s, "_")
 }

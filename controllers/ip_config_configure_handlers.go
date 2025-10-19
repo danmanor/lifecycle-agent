@@ -103,7 +103,7 @@ func (c *IPConfigConfigureHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCo
 		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Configure),
 		controllerutils.ConditionReasons.InProgress,
 		metav1.ConditionTrue,
-		"lca-cli ip-config run scheduled",
+		"IP configuration is in progress",
 		ipc.Generation,
 	)
 	if err := c.Client.Status().Update(ctx, ipc); err != nil {
@@ -336,6 +336,12 @@ func (r *IPConfigReconciler) handleConfigureSucceeded(ctx context.Context, ipc *
 		"Configuration completed",
 		ipc.Generation,
 	)
+
+	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
+	if err != nil {
+		return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
+	}
+	ipc.Status.ValidNextStages = validNextStages
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))

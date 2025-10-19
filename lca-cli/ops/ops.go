@@ -49,6 +49,7 @@ type Ops interface {
 	RunRecert(recertContainerImage, authFile, recertConfigFile string, additionalPodmanParams ...string) error
 	ExtractTarWithSELinux(srcPath, destPath string) error
 	RemountSysroot() error
+	RemountBoot() error
 	ImageExists(img string) (bool, error)
 	IsImageMounted(img string) (bool, error)
 	UnmountAndRemoveImage(img string) error
@@ -318,6 +319,13 @@ func (o *ops) ExtractTarWithSELinux(srcPath, destPath string) error {
 func (o *ops) RemountSysroot() error {
 	if _, err := o.hostCommandsExecutor.Execute("mount", "/sysroot", "-o", "remount,rw"); err != nil {
 		return fmt.Errorf("failed to remount sysroot: %w", err)
+	}
+	return nil
+}
+
+func (o *ops) RemountBoot() error {
+	if _, err := o.hostCommandsExecutor.Execute("mount", "/boot", "-o", "remount,rw"); err != nil {
+		return fmt.Errorf("failed to remount boot: %w", err)
 	}
 	return nil
 }

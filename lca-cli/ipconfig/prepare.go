@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
@@ -65,9 +64,8 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		return
 	}
 
-	var rootDirForClusterServices string
 	defer func() {
-		if internalErr := p.ops.EnableClusterServices(rootDirForClusterServices); internalErr != nil {
+		if internalErr := p.ops.EnableClusterServices(""); internalErr != nil {
 			if err == nil {
 				err = internalErr
 			} else {
@@ -89,7 +87,11 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		err = fmt.Errorf("failed to get deployment dir for %s: %w", newStateroot, err)
 		return
 	}
-	rootDirForClusterServices = newDeploymentDir
+
+	if err = p.ops.EnableClusterServices(newDeploymentDir); err != nil {
+		err = fmt.Errorf("failed to enable cluster services: %w", err)
+		return
+	}
 
 	p.log.Info("IP config prepare done successfully")
 
@@ -99,10 +101,10 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 func (p *PrepareHandler) BuildStaterootName(newIPv4, newIPv6 string) (string, error) {
 	nameParts := []string{"rhcos"}
 	if newIPv4 != "" {
-		nameParts = append(nameParts, sanitizeForOsname(newIPv4))
+		nameParts = append(nameParts, common.SanitizeForOsname(newIPv4))
 	}
 	if newIPv6 != "" {
-		nameParts = append(nameParts, sanitizeForOsname(newIPv6))
+		nameParts = append(nameParts, common.SanitizeForOsname(newIPv6))
 	}
 	return strings.Join(nameParts, "_"), nil
 }
@@ -310,13 +312,3 @@ func buildKernelArgsFromMachineConfig(mc *mcfgv1.MachineConfig) ([]string, error
 	}
 	return args, nil
 }
-
-func sanitizeForOsname(s string) string {
-	s = strings.Trim(s, "[]")
-	s = strings.Split(s, "/")[0]
-	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
-	return re.ReplaceAllString(s, "-")
-}
-
-// writeIPConfigPrepareStatus writes current status to the prepare status file.
-// status write/finalize handled by CLI layer for prepare

@@ -86,6 +86,12 @@ func (r *IPConfigReconciler) handlePrepare(ctx context.Context, ipc *ipcv1.IPCon
 		ipc.Generation,
 	)
 
+	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
+	if err != nil {
+		return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
+	}
+	ipc.Status.ValidNextStages = validNextStages
+
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
@@ -156,7 +162,7 @@ func (p *IPConfigPrepareHandler) handlePrepareUnknown(ctx context.Context, ipc *
 		controllerutils.GetIPInProgressConditionType(ipcv1.IPStages.Prepare),
 		controllerutils.ConditionReasons.InProgress,
 		metav1.ConditionTrue,
-		"lca-cli ip-config prepare scheduled",
+		"IP configuration preparation is in progress",
 		ipc.Generation,
 	)
 	if err := p.Client.Status().Update(ctx, ipc); err != nil {
