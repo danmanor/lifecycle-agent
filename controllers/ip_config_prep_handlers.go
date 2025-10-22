@@ -57,6 +57,28 @@ func (r *IPConfigReconciler) handlePrep(ctx context.Context, ipc *ipcv1.IPConfig
 	logger := log.FromContext(ctx).WithName("IPConfigPrep")
 	logger.Info("Starting handlePrep")
 
+	if err := statusIPsMatchSpec(ipc); err == nil {
+		controllerutils.SetIPPrepStatusCompleted(ipc, "Desired IP equals current IP")
+
+		validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
+		if err != nil {
+			return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
+		}
+		ipc.Status.ValidNextStages = validNextStages
+
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
+		logger.Info("Spec IPs already match current status")
+
+		return doNotRequeue(), nil
+	}
+
+	if err := validateSpecIPsInMachineNetworks(ipc); err != nil {
+		return requeueWithError(fmt.Errorf("invalid ipconfig spec: %w", err))
+	}
+
 	isBeforePivot := !isTargetStaterootBooted(ipc, r.RPMOstreeClient)
 
 	if isBeforePivot {

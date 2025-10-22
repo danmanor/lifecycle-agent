@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
@@ -200,37 +201,65 @@ func cleanupIPConfigFiles() error {
 }
 
 func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error {
-	bootDirsToRemove, err := getBootDirectoriesToRemove(r.RPMOstreeClient)
+	staterootsToRemove, err := getStaterootsToRemove(r.RPMOstreeClient)
 	if err != nil {
-		return fmt.Errorf("failed to determine boot directories to remove: %w", err)
+		return fmt.Errorf("failed to determine stateroots to remove: %w", err)
+	}
+	logger.Info("Stateroots to remove", "stateroots", staterootsToRemove)
+
+	if err := r.Ops.RemountBoot(); err != nil {
+		return fmt.Errorf("failed to remount boot: %w", err)
 	}
 
-	for _, dirPath := range bootDirsToRemove {
-		logger.Info("Removing orphaned boot directory", "path", dirPath)
-		if err := os.RemoveAll(dirPath); err != nil {
-			return fmt.Errorf("failed to remove boot directory %s: %w", dirPath, err)
-		}
+	if err := removeBootDirsByStaterootPrefixes(logger, staterootsToRemove); err != nil {
+		return err
 	}
 
 	if err := CleanupUnbootedStateroots(logger, r.Ops, r.OstreeClient, r.RPMOstreeClient); err != nil {
 		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
 	}
 
-	if err := r.Ops.RemountBoot(); err != nil {
-		return fmt.Errorf("failed to remount boot: %w", err)
-	}
-
 	return nil
 }
 
-func getBootDirectoriesToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]string, error) {
+// removeBootDirsByStaterootPrefixes removes directories under /boot/ostree that
+// start with any of the given stateroot names followed by a hyphen.
+func removeBootDirsByStaterootPrefixes(logger logr.Logger, staterootsToRemove []string) error {
+	bootOstreePath := common.PathOutsideChroot("/boot/ostree")
+	entries, err := os.ReadDir(bootOstreePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to list boot ostree directory %s: %w", bootOstreePath, err)
+	}
+
+	for _, stateroot := range staterootsToRemove {
+		prefix := stateroot + "-"
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			dirPath := filepath.Join(bootOstreePath, name)
+			logger.Info("Removing orphaned boot directory", "path", dirPath)
+			if err := os.RemoveAll(dirPath); err != nil {
+				return fmt.Errorf("failed to remove boot directory %s: %w", dirPath, err)
+			}
+		}
+	}
+	return nil
+}
+
+func getStaterootsToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]string, error) {
 	status, err := rpmOstreeClient.QueryStatus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to query status with rpmostree: %w", err)
 	}
 
-	// Build the list of boot directories for unbooted deployments: /boot/ostree/<osname>-<checksum>
-	seen := map[string]struct{}{}
 	toRemove := make([]string, 0)
 
 	for i := len(status.Deployments) - 1; i >= 0; i-- {
@@ -238,16 +267,7 @@ func getBootDirectoriesToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]stri
 		if deployment.Booted {
 			continue
 		}
-		if deployment.Checksum == "" || deployment.OSName == "" {
-			continue
-		}
-		dirName := fmt.Sprintf("%s-%s", deployment.OSName, deployment.Checksum)
-		if _, exists := seen[dirName]; exists {
-			continue
-		}
-		seen[dirName] = struct{}{}
-
-		toRemove = append(toRemove, common.PathOutsideChroot(filepath.Join("/boot/ostree", dirName)))
+		toRemove = append(toRemove, deployment.OSName)
 	}
 
 	return toRemove, nil

@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 
@@ -71,6 +72,10 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	ipc, err := r.getOrCreateIPConfig(ctx)
 	if err != nil {
 		return requeueWithError(fmt.Errorf("failed to get or create IPConfig: %w", err))
+	}
+
+	if err := validateSpecIPsInMachineNetworks(ipc); err != nil {
+		return requeueWithError(fmt.Errorf("invalid ipconfig spec: %w", err))
 	}
 
 	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
@@ -302,4 +307,62 @@ func isIPTransitionRequested(ipc *ipcv1.IPConfig) bool {
 	}
 	return !(controllerutils.IsIPStageCompletedOrFailed(ipc, desiredStage) ||
 		controllerutils.IsIPStageInProgress(ipc, desiredStage))
+}
+
+// validateSpecIPsInMachineNetworks ensures that, for each provided family, the given IP
+// is valid and contained within the provided machine network CIDR.
+func validateSpecIPsInMachineNetworks(ipc *ipcv1.IPConfig) error {
+	// IPv4 validation
+	if v := ipc.Spec.IPv4; v != nil {
+		hasAddr := v.Address != ""
+		hasNet := v.MachineNetwork != ""
+		if hasAddr != hasNet {
+			return fmt.Errorf("both IPv4 address and machineNetwork must be provided together")
+		}
+		if hasAddr {
+			ipStr := strings.Split(v.Address, "/")[0]
+			ip := net.ParseIP(ipStr)
+			if ip == nil || ip.To4() == nil {
+				return fmt.Errorf("invalid IPv4 address: %s", ipStr)
+			}
+			_, ipNet, err := net.ParseCIDR(v.MachineNetwork)
+			if err != nil {
+				return fmt.Errorf("invalid IPv4 machine network CIDR: %s", v.MachineNetwork)
+			}
+			if ipNet.IP.To4() == nil {
+				return fmt.Errorf("ipv4 machineNetwork must be an IPv4 CIDR: %s", v.MachineNetwork)
+			}
+			if !ipNet.Contains(ip) {
+				return fmt.Errorf("IPv4 address %s is not within machine network %s", ipStr, v.MachineNetwork)
+			}
+		}
+	}
+
+	if v := ipc.Spec.IPv6; v != nil {
+		hasAddr := v.Address != ""
+		hasNet := v.MachineNetwork != ""
+		if hasAddr != hasNet {
+			return fmt.Errorf("both IPv6 address and machineNetwork must be provided together")
+		}
+		if hasAddr {
+			addr := strings.Split(v.Address, "/")[0]
+			ipStr := strings.Trim(addr, "[]")
+			ip := net.ParseIP(ipStr)
+			if ip == nil || ip.To4() != nil {
+				return fmt.Errorf("invalid IPv6 address: %s", ipStr)
+			}
+			_, ipNet, err := net.ParseCIDR(v.MachineNetwork)
+			if err != nil {
+				return fmt.Errorf("invalid IPv6 machine network CIDR: %s", v.MachineNetwork)
+			}
+			if ipNet.IP.To4() != nil {
+				return fmt.Errorf("ipv6 machineNetwork must be an IPv6 CIDR: %s", v.MachineNetwork)
+			}
+			if !ipNet.Contains(ip) {
+				return fmt.Errorf("IPv6 address %s is not within machine network %s", ipStr, v.MachineNetwork)
+			}
+		}
+	}
+
+	return nil
 }

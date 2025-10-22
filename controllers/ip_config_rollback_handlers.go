@@ -66,6 +66,14 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 		return requeueWithError(fmt.Errorf("failed to determine unbooted stateroot: %w", err))
 	}
 
+	if err := r.Ops.RemountSysroot(); err != nil {
+		controllerutils.SetIPRollbackStatusFailed(ipc, controllerutils.RollbackFailed+": "+err.Error())
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithError(fmt.Errorf("failed to remount sysroot: %w", err))
+	}
+
 	logger.Info("Save the IPConfig CR to the old state root before pivot")
 	ipcsavePath := common.PathOutsideChroot(filepath.Join(common.GetStaterootPath(stateroot), controllerutils.IPCFilePath))
 	if err := lcautils.MarshalToFile(ipc, ipcsavePath); err != nil {
