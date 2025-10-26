@@ -36,6 +36,7 @@ var initMonitorCmd = &cobra.Command{
 var (
 	launchMonitor              bool
 	monitorSvcUnitComponentTag string
+	monitorMode                string
 )
 
 func init() {
@@ -45,6 +46,7 @@ func init() {
 
 	initMonitorCmd.Flags().BoolVar(&launchMonitor, "monitor", false, "Run LCA init monitor")
 	initMonitorCmd.Flags().StringVar(&monitorSvcUnitComponentTag, "exec-stop-post", "", "Run ExecStopPost, with specified component tag")
+	initMonitorCmd.Flags().StringVar(&monitorMode, "mode", "ibu", "Init monitor mode: 'ibu' or 'ipc'")
 	initMonitorCmd.MarkFlagsMutuallyExclusive("monitor", "exec-stop-post")
 }
 
@@ -52,7 +54,7 @@ func initMonitor() error {
 	var hostCommandsExecutor ops.Execute
 	hostCommandsExecutor = ops.NewRegularExecutor(log, true)
 
-	initMonitorRunner := initmonitor.NewInitMonitor(scheme, log, hostCommandsExecutor, ops.NewOps(log, hostCommandsExecutor), monitorSvcUnitComponentTag)
+	initMonitorRunner := initmonitor.NewInitMonitor(scheme, log, hostCommandsExecutor, ops.NewOps(log, hostCommandsExecutor), monitorSvcUnitComponentTag, monitorMode)
 	if launchMonitor {
 		if err := initMonitorRunner.RunInitMonitor(); err != nil {
 			return fmt.Errorf("failed to run init monitor: %w", err)

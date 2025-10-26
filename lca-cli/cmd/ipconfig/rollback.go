@@ -55,7 +55,6 @@ func runIPConfigRollback() error {
 		return fmt.Errorf("--stateroot is required")
 	}
 
-	// Use existing clients
 	var hostCommandsExecutor ops.Execute
 	if _, err := os.Stat(common.Host); err == nil {
 		hostCommandsExecutor = ops.NewChrootExecutor(pkgLog, true, common.Host)
@@ -66,9 +65,8 @@ func runIPConfigRollback() error {
 	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-rollback", hostCommandsExecutor)
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
 
-	rb := reboot.NewRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
+	rb := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
-	// Write initial rollback status
 	if err := common.WriteIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunStatus{
 		Phase:     common.IPConfigRunPhaseRunning,
 		Message:   "ip-config rollback started",
@@ -77,7 +75,7 @@ func runIPConfigRollback() error {
 		return fmt.Errorf("failed to write initial rollback status: %w", err)
 	}
 
-	exec := ipconfig.NewRollbackHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rb)
+	exec := ipconfig.NewRollbackHandler(pkgLog, opsInterface, ostreeClient, rpmClient)
 	if err := exec.RunRollback(rollbackStateroot); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunPhaseFailed, fmt.Sprintf("ip-config rollback failed: %v", err))
 		if internalErr != nil {
@@ -94,15 +92,8 @@ func runIPConfigRollback() error {
 		return fmt.Errorf("failed to mark rollback as successful: %w", err)
 	}
 
-	// Schedule reboot on the host namespace
-	hostExec := ops.NewNsenterExecutor(pkgLog, true)
-	if _, err := hostExec.Execute(
-		"systemd-run",
-		"--unit", "lca-ipconfig-rollback-reboot",
-		"--description", "lifecycle-agent: ip-config rollback reboot",
-		"systemctl", "reboot",
-	); err != nil {
-		return fmt.Errorf("failed to schedule reboot: %w", err)
+	if err := rb.RebootToNewStateRoot("ip-config rollback"); err != nil {
+		return fmt.Errorf("failed to reboot: %w", err)
 	}
 
 	return nil

@@ -19,3 +19,8 @@ func CopyLcaCliToHost(logger logr.Logger) error {
 	}
 	return nil
 }
+
+// CommandExecutor is a minimal interface satisfied by types that can Execute commands.
+type CommandExecutor interface {
+	Execute(command string, args ...string) (string, error)
+}

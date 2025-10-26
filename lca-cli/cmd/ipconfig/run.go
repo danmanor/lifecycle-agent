@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -31,15 +32,17 @@ import (
 	runtimeClient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
+	intOstree "github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
+	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ipconfig"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
+	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
 
 var (
 	ipConfigScheme = runtime.NewScheme()
 
-	// IP configuration parameters
 	ipv4Address        string
 	ipv4MachineNetwork string
 	ipv6Address        string
@@ -59,9 +62,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(ipConfigScheme))
 	utilruntime.Must(machineconfigv1.AddToScheme(ipConfigScheme))
 
-	// subcommand is added by NewIPConfigCmd after globals are initialized
-
-	// Flags
 	ipConfigRunCmd.Flags().StringVar(&ipv4Address, "ipv4-address", "", "Target IPv4 address")
 	ipConfigRunCmd.Flags().StringVar(&ipv4MachineNetwork, "ipv4-machine-network", "", "Target IPv4 machine network CIDR")
 	ipConfigRunCmd.Flags().StringVar(&ipv6Address, "ipv6-address", "", "Target IPv6 address")
@@ -153,6 +153,10 @@ func runIPConfigChange() error {
 		pullSecretFile,
 	)
 
+	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-run", hostCommandsExecutor)
+	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
+	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
+
 	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRunStatusFile,
@@ -162,6 +166,8 @@ func runIPConfigChange() error {
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config run status: %w", internalErr)
 		}
+
+		rbClient.AutoRollbackIfEnabled(reboot.IPConfigRunComponent, "ip-config run failed")
 		return fmt.Errorf("failed to run IP config process: %w", err)
 	}
 
@@ -173,14 +179,8 @@ func runIPConfigChange() error {
 		return fmt.Errorf("failed to mark IP config run as successful: %w", err)
 	}
 
-	hostExec := ops.NewNsenterExecutor(pkgLog, true)
-	if _, err := hostExec.Execute(
-		"systemd-run",
-		"--unit", "lca-ipconfig-reboot",
-		"--description", "lifecycle-agent: ip-config reboot",
-		"systemctl", "reboot",
-	); err != nil {
-		return fmt.Errorf("failed to schedule reboot: %w", err)
+	if err := rbClient.Reboot("ip-config run"); err != nil {
+		return fmt.Errorf("failed to reboot: %w", err)
 	}
 
 	return nil

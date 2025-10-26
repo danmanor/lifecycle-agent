@@ -24,11 +24,18 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=ipconfigs,scope=Cluster,shortName=ipc
+// +operator-sdk:csv:customresourcedefinitions:displayName="IP Configuration",resources={{Namespace, v1}}
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:printcolumn:name="Desired Stage",type="string",JSONPath=".spec.stage"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.conditions[-1:].reason"
 // +kubebuilder:printcolumn:name="Details",type="string",JSONPath=".status.conditions[-1:].message"
+// +kubebuilder:printcolumn:name="Desired IPv4",type="string",JSONPath=".spec.ipv4.address"
+// +kubebuilder:printcolumn:name="Current IPv4",type="string",JSONPath=".status.clusterIPs.nodeInternalIPs[?(@.family=='IPv4')].address"
+// +kubebuilder:printcolumn:name="Desired IPv6",type="string",JSONPath=".spec.ipv6.address"
+// +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.clusterIPs.nodeInternalIPs[?(@.family=='IPv6')].address"
 // +kubebuilder:validation:XValidation:message="ipconfig is a singleton, metadata.name must be 'ipconfig'", rule="self.metadata.name == 'ipconfig'"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || self.spec.stage=='Idle' || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv6 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || self.spec.stage=='Idle' || has(oldSelf.spec.ipv6) && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)"
 
 // IPConfig is the Schema for controlling node IP configuration lifecycle via lca-cli ip-config.
 type IPConfig struct {
@@ -65,61 +72,100 @@ var IPStages = struct {
 
 // IPFamilyConfig represents a single stack configuration
 type IPFamilyConfig struct {
+	// +kubebuilder:validation:Required
 	// Address is the full address with prefix length (e.g., 192.0.2.10/24)
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Address string `json:"address,omitempty"`
 	// Gateway is the default gateway address
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Gateway string `json:"gateway,omitempty"`
+	// +kubebuilder:validation:Required
 	// MachineNetwork is the CIDR of the machine network (e.g., 192.0.2.0/24)
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	MachineNetwork string `json:"machineNetwork,omitempty"`
 	// DNSServer is the DNS server IP to use
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	DNSServer string `json:"dnsServer,omitempty"`
 }
 
 // VLANConfig represents optional VLAN configuration for the detected br-ex path
 type VLANConfig struct {
+	// +kubebuilder:validation:Required
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:number"}
 	ID int `json:"id,omitempty"`
 }
 
 // ProxyConfig represents optional proxy configuration
 type ProxyConfig struct {
-	HTTPProxy  string   `json:"httpProxy,omitempty"`
-	HTTPSProxy string   `json:"httpsProxy,omitempty"`
-	NoProxy    []string `json:"noProxy,omitempty"`
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	HTTPProxy string `json:"httpProxy,omitempty"`
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	HTTPSProxy string `json:"httpsProxy,omitempty"`
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:arrayFieldGroup"}
+	NoProxy []string `json:"noProxy,omitempty"`
 }
 
 // IPConfigSpec defines the desired state of IPConfig
 type IPConfigSpec struct {
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=Idle;Prep;Config;Rollback
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Stage"
 	Stage IPConfigStage `json:"stage,omitempty"`
 
 	// pullSecretRef is the name of a Secret in the openshift-config namespace containing .dockerconfigjson
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Pull Secret Reference",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	PullSecretRef string `json:"pullSecretRef,omitempty"`
 
 	// IPv4 stack (omit for IPv6-only)
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="IPv4"
 	IPv4 *IPFamilyConfig `json:"ipv4,omitempty"`
 
 	// IPv6 stack (omit for IPv4-only)
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="IPv6"
 	IPv6 *IPFamilyConfig `json:"ipv6,omitempty"`
 
 	// Optional VLAN applied to br-ex path
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="VLAN"
 	VLAN *VLANConfig `json:"vlan,omitempty"`
 
 	// Optional proxy settings
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy"
 	Proxy *ProxyConfig `json:"proxy,omitempty"`
 
 	// Recert image for certificate rotation during config stage
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Recert Image",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	RecertImage string `json:"recertImage,omitempty"`
+
+	// AutoRollbackOnFailure defines automatic rollback settings for IPConfig if the configuration
+	// does not complete within the specified time limit. Behavior mirrors IBU.
+	// +optional
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Auto Rollback On Failure"
+	AutoRollbackOnFailure *AutoRollbackOnFailure `json:"autoRollbackOnFailure,omitempty"`
+}
+
+// AutoRollbackOnFailure defines automatic rollback settings if the IP configuration does not
+// complete within the specified time limit.
+type AutoRollbackOnFailure struct {
+	// InitMonitorTimeoutSeconds defines the time frame in seconds. If not defined or set to 0,
+	// the default value of 1800 seconds (30 minutes) is used.
+	// +kubebuilder:validation:Minimum=0
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:number"}
+	InitMonitorTimeoutSeconds int `json:"initMonitorTimeoutSeconds,omitempty"`
 }
 
 // IPConfigStatus defines the observed state of IPConfig
 type IPConfigStatus struct {
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Observed Generation"
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Conditions",xDescriptors={"urn:alm:descriptor:io.kubernetes.conditions"}
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ValidNextStages enumerates allowed next transitions from current stage
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Valid Next Stage"
 	ValidNextStages []IPConfigStage `json:"validNextStages,omitempty"`
 
 	// ClusterIPs reflects the node internal IPs known to the cluster
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Cluster IPs"
 	ClusterIPs *ClusterIPsStatus `json:"clusterIPs,omitempty"`
 }
 

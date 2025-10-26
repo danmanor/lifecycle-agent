@@ -17,37 +17,29 @@ type ConditionType string
 
 // ConditionTypes define the different types of conditions that will be set
 var ConditionTypes = struct {
-	Idle                  ConditionType
-	PrepInProgress        ConditionType
-	PrepCompleted         ConditionType
-	UpgradeInProgress     ConditionType
-	UpgradeCompleted      ConditionType
-	RollbackInProgress    ConditionType
-	RollbackCompleted     ConditionType
-	SeedGenInProgress     ConditionType
-	SeedGenCompleted      ConditionType
-	IPPrepareInProgress   ConditionType
-	IPPrepareCompleted    ConditionType
-	IPConfigureInProgress ConditionType
-	IPConfigureCompleted  ConditionType
-	IPRollbackInProgress  ConditionType
-	IPRollbackCompleted   ConditionType
+	Idle               ConditionType
+	PrepInProgress     ConditionType
+	PrepCompleted      ConditionType
+	UpgradeInProgress  ConditionType
+	UpgradeCompleted   ConditionType
+	RollbackInProgress ConditionType
+	RollbackCompleted  ConditionType
+	SeedGenInProgress  ConditionType
+	SeedGenCompleted   ConditionType
+	ConfigInProgress   ConditionType
+	ConfigCompleted    ConditionType
 }{
-	Idle:                  "Idle",
-	PrepInProgress:        "PrepInProgress",
-	PrepCompleted:         "PrepCompleted",
-	UpgradeInProgress:     "UpgradeInProgress",
-	UpgradeCompleted:      "UpgradeCompleted",
-	RollbackInProgress:    "RollbackInProgress",
-	RollbackCompleted:     "RollbackCompleted",
-	SeedGenInProgress:     "SeedGenInProgress",
-	SeedGenCompleted:      "SeedGenCompleted",
-	IPPrepareInProgress:   "IPPrepareInProgress",
-	IPPrepareCompleted:    "IPPrepareCompleted",
-	IPConfigureInProgress: "IPConfigureInProgress",
-	IPConfigureCompleted:  "IPConfigureCompleted",
-	IPRollbackInProgress:  "IPRollbackInProgress",
-	IPRollbackCompleted:   "IPRollbackCompleted",
+	Idle:               "Idle",
+	PrepInProgress:     "PrepInProgress",
+	PrepCompleted:      "PrepCompleted",
+	UpgradeInProgress:  "UpgradeInProgress",
+	UpgradeCompleted:   "UpgradeCompleted",
+	RollbackInProgress: "RollbackInProgress",
+	RollbackCompleted:  "RollbackCompleted",
+	SeedGenInProgress:  "SeedGenInProgress",
+	SeedGenCompleted:   "SeedGenCompleted",
+	ConfigInProgress:   "ConfigInProgress",
+	ConfigCompleted:    "ConfigCompleted",
 }
 
 var SeedGenConditionTypes = struct {
@@ -174,6 +166,22 @@ func ResetStatusConditions(existingConditions *[]metav1.Condition, generation in
 	)
 }
 
+// IsOnlyIdleConditionTrue returns true only if the conditions slice contains
+// exactly one condition of type Idle and it is true. This indicates that
+// cleanup has completed and conditions were reset.
+func IsIdleConditionTrue(conditions []metav1.Condition) bool {
+	if len(conditions) == 0 {
+		return false
+	}
+
+	idle := meta.FindStatusCondition(conditions, string(ConditionTypes.Idle))
+	if idle == nil {
+		return false
+	}
+
+	return idle.Status == metav1.ConditionTrue
+}
+
 // IsStageCompleted checks if the completed condition status for the stage is true
 func IsStageCompleted(ibu *ibuv1.ImageBasedUpgrade, stage ibuv1.ImageBasedUpgradeStage) bool {
 	condition := GetCompletedCondition(ibu, stage)
@@ -291,11 +299,11 @@ func GetIPInProgressConditionType(stage ipcv1.IPConfigStage) (conditionType Cond
 	case ipcv1.IPStages.Idle:
 		conditionType = ConditionTypes.Idle
 	case ipcv1.IPStages.Prep:
-		conditionType = ConditionTypes.IPPrepareInProgress
+		conditionType = ConditionTypes.PrepInProgress
 	case ipcv1.IPStages.Config:
-		conditionType = ConditionTypes.IPConfigureInProgress
+		conditionType = ConditionTypes.ConfigInProgress
 	case ipcv1.IPStages.Rollback:
-		conditionType = ConditionTypes.IPRollbackInProgress
+		conditionType = ConditionTypes.RollbackInProgress
 	}
 	return
 }
@@ -306,11 +314,11 @@ func GetIPCompletedConditionType(stage ipcv1.IPConfigStage) (conditionType Condi
 	case ipcv1.IPStages.Idle:
 		conditionType = ConditionTypes.Idle
 	case ipcv1.IPStages.Prep:
-		conditionType = ConditionTypes.IPPrepareCompleted
+		conditionType = ConditionTypes.PrepCompleted
 	case ipcv1.IPStages.Config:
-		conditionType = ConditionTypes.IPConfigureCompleted
+		conditionType = ConditionTypes.ConfigCompleted
 	case ipcv1.IPStages.Rollback:
-		conditionType = ConditionTypes.IPRollbackCompleted
+		conditionType = ConditionTypes.RollbackCompleted
 	}
 	return
 }
@@ -498,7 +506,7 @@ func SetIdleStatusInProgress(ibu *ibuv1.ImageBasedUpgrade, reason ConditionReaso
 }
 
 // SetIPIdleStatusInProgress updates the IPConfig Idle status to in progress with message
-func SetIPIdleStatusInProgress(ipc *ipcv1.IPConfig, reason ConditionReason, msg string) {
+func SetIPIdleStatusFalse(ipc *ipcv1.IPConfig, reason ConditionReason, msg string) {
 	SetStatusCondition(&ipc.Status.Conditions,
 		ConditionTypes.Idle,
 		reason,

@@ -126,8 +126,8 @@ func GetStaterootCertsDir(ibu *ibuv1.ImageBasedUpgrade) string {
 	return PathOutsideChroot(filepath.Join(GetStaterootOptOpenshift(GetStaterootPath(GetDesiredStaterootName(ibu))), KubeconfigCryptoDir))
 }
 
-func GetStaterootName(seedImageVersion string) string {
-	return fmt.Sprintf("rhcos_%s", strings.ReplaceAll(seedImageVersion, "-", "_"))
+func GetStaterootName(identifier string) string {
+	return fmt.Sprintf("rhcos_%s", strings.ReplaceAll(identifier, "-", "_"))
 }
 
 func RemoveDuplicates[T comparable](list []T) []T {

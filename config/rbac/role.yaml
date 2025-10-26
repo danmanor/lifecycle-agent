@@ -219,12 +219,6 @@ rules:
 - apiGroups:
   - lca.openshift.io
   resources:
-  - ipconfigs/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - lca.openshift.io
-  resources:
   - ipconfigs/status
   verbs:
   - get

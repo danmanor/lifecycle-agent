@@ -221,7 +221,8 @@ func main() {
 	op := ops.NewOps(newLogger, executor)
 	rpmOstreeClient := rpmostreeclient.NewClient("ibu-controller", executor)
 	ostreeClient := ostreeclient.NewClient(executor, false)
-	rebootClient := reboot.NewRebootClient(&log, executor, rpmOstreeClient, ostreeClient, op)
+	ibuRebootClient := reboot.NewIBURebootClient(&log, executor, rpmOstreeClient, ostreeClient, op)
+	ipcRebootClient := reboot.NewIPCRebootClient(&log, executor, rpmOstreeClient, ostreeClient, op)
 	imageMgmtClient := imagemgmt.NewImageMgmtClient(&log, executor, common.PathOutsideChroot(common.ContainerStoragePath))
 
 	if err := lcautils.InitIBU(context.TODO(), mgr.GetClient(), &setupLog); err != nil {
@@ -282,7 +283,7 @@ func main() {
 		Executor:        executor,
 		OstreeClient:    ostreeClient,
 		Ops:             op,
-		RebootClient:    rebootClient,
+		RebootClient:    ibuRebootClient,
 		BackupRestore:   backupRestore,
 		ExtraManifest:   extraManifest,
 		UpgradeHandler: &controllers.UpgHandler{
@@ -297,7 +298,7 @@ func main() {
 			Recorder:        mgr.GetEventRecorderFor("ImageBasedUpgrade"),
 			RPMOstreeClient: rpmOstreeClient,
 			OstreeClient:    ostreeClient,
-			RebootClient:    rebootClient,
+			RebootClient:    ibuRebootClient,
 		},
 		Mux:       mux,
 		Clientset: clientset,
@@ -318,7 +319,7 @@ func main() {
 		Scheme:          mgr.GetScheme(),
 		Executor:        executor,
 		Ops:             op,
-		RebootClient:    rebootClient,
+		RebootClient:    ipcRebootClient,
 		OstreeClient:    ostreeClient,
 		RPMOstreeClient: rpmOstreeClient,
 		Mux:             mux,
@@ -327,7 +328,7 @@ func main() {
 			mgr.GetAPIReader(),
 			executor,
 			op,
-			rebootClient,
+			ipcRebootClient,
 			mgr.GetScheme(),
 			clientset,
 		),
@@ -336,7 +337,7 @@ func main() {
 			mgr.GetAPIReader(),
 			executor,
 			op,
-			rebootClient,
+			ipcRebootClient,
 			ostreeClient,
 		),
 		RollbackHandler: controllers.NewIPConfigRollbackHandler(
@@ -345,7 +346,7 @@ func main() {
 			rpmOstreeClient,
 			executor,
 			op,
-			rebootClient,
+			ipcRebootClient,
 		),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPConfig")

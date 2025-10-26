@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 
@@ -19,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	ibuv1 "github.com/openshift-kni/lifecycle-agent/api/imagebasedupgrade/v1"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
@@ -33,7 +31,6 @@ import (
 
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs/finalizers,verbs=update
 
 // IPConfigReconciler reconciles an IPConfig object
 type IPConfigReconciler struct {
@@ -52,7 +49,7 @@ type IPConfigReconciler struct {
 	Mux             *sync.Mutex
 }
 
-func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	if r.Mux != nil {
 		r.Mux.Lock()
 		defer r.Mux.Unlock()
@@ -65,40 +62,42 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		"namespace", req.NamespacedName.Namespace,
 	)
 
-	if err := validateIPConfigName(req); err != nil {
-		return requeueWithError(fmt.Errorf("invalid IPConfig name: %w", err))
-	}
-
 	ipc, err := r.getOrCreateIPConfig(ctx)
 	if err != nil {
 		return requeueWithError(fmt.Errorf("failed to get or create IPConfig: %w", err))
 	}
+	ipc.Status.ObservedGeneration = ipc.Generation
 
-	if err := validateSpecIPsInMachineNetworks(ipc); err != nil {
-		return requeueWithError(fmt.Errorf("invalid ipconfig spec: %w", err))
-	}
+	defer func() {
+		vns, vErr := validNextStages(ipc, r.RPMOstreeClient)
+		if vErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%w; also failed to get valid next stages: %v", err, vErr)
+			} else {
+				err = fmt.Errorf("failed to get valid next stages: %w", vErr)
+			}
+			return
+		}
+		ipc.Status.ValidNextStages = vns
+		if uErr := r.Client.Status().Update(ctx, ipc); uErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%w; also failed to update ipconfig status: %v", err, uErr)
+			} else {
+				err = fmt.Errorf("failed to update ipconfig status: %w", uErr)
+			}
+		}
+	}()
 
-	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
-	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
-	}
-	ipc.Status.ValidNextStages = validNextStages
-
-	if err := r.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update IPConfig status: %w", err))
-	}
-
-	if isIPTransitionRequested(ipc) {
-		if err := r.validateIPConfigStage(ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to validate IPConfig stage: %w", err))
+	if ipc.Status.ValidNextStages == nil {
+		vns, err := validNextStages(ipc, r.RPMOstreeClient)
+		if err != nil {
+			return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
+		}
+		ipc.Status.ValidNextStages = vns
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 	}
-
-	if err := r.validateIBUIdle(ctx); err != nil {
-		return requeueWithError(fmt.Errorf("failed to validate IBU idle: %w", err))
-	}
-
-	ipc.Status.ObservedGeneration = ipc.Generation
 
 	if err := refreshCurrentIPs(ctx, ipc, r.NoncachedClient); err != nil {
 		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
@@ -114,7 +113,9 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	case ipcv1.IPStages.Rollback:
 		return r.handleRollback(ctx, ipc)
 	default:
-		return requeueWithError(fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage))
+		// Shouldn't happen
+		logger.Error(nil, "invalid IPConfig stage", "stage", ipc.Spec.Stage)
+		return doNotRequeue(), nil
 	}
 }
 
@@ -229,20 +230,31 @@ func (r *IPConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ipcv1.IPConfig{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+				if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+					return true
+				}
+
+				// trigger reconcile upon adding or removing ManualCleanupAnnotation
+				_, oldExist := e.ObjectOld.GetAnnotations()[controllerutils.ManualCleanupAnnotation]
+				_, newExist := e.ObjectNew.GetAnnotations()[controllerutils.ManualCleanupAnnotation]
+				if oldExist != newExist {
+					return true
+				}
+
+				// trigger reconcile upon adding or updating TriggerReconcileAnnotation
+				oldValue, oldHas := e.ObjectOld.GetAnnotations()[controllerutils.TriggerReconcileAnnotation]
+				newValue, newHas := e.ObjectNew.GetAnnotations()[controllerutils.TriggerReconcileAnnotation]
+				if (!oldHas && newHas) || (oldHas && newHas && oldValue != newValue) {
+					return true
+				}
+
+				return false
 			},
 			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return false },
 		})).
 		Complete(r)
-}
-
-func validateIPConfigName(req ctrl.Request) error {
-	if req.Name != common.IPConfigName {
-		return fmt.Errorf("ipconfig CR must be named %s", common.IPConfigName)
-	}
-	return nil
 }
 
 func (r *IPConfigReconciler) getOrCreateIPConfig(ctx context.Context) (*ipcv1.IPConfig, error) {
@@ -269,28 +281,6 @@ func (r *IPConfigReconciler) getOrCreateIPConfig(ctx context.Context) (*ipcv1.IP
 	return ipc, nil
 }
 
-func (r *IPConfigReconciler) getIBUStage(ctx context.Context) (*ibuv1.ImageBasedUpgradeStage, error) {
-	ibu := &ibuv1.ImageBasedUpgrade{}
-	if err := r.NoncachedClient.Get(ctx, client.ObjectKey{Name: "upgrade"}, ibu); err != nil {
-		return nil, fmt.Errorf("failed to get IBU: %w", err)
-	}
-
-	return &ibu.Spec.Stage, nil
-}
-
-func (r *IPConfigReconciler) validateIBUIdle(ctx context.Context) error {
-	ibuStage, err := r.getIBUStage(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get IBU stage: %w", err)
-	}
-
-	if lo.FromPtr(ibuStage) != ibuv1.Stages.Idle {
-		return fmt.Errorf("IBU is not in Idle stage, current stage is %s", lo.FromPtr(ibuStage))
-	}
-
-	return nil
-}
-
 func (r *IPConfigReconciler) validateIPConfigStage(ipc *ipcv1.IPConfig) error {
 	if !lo.Contains(ipc.Status.ValidNextStages, ipc.Spec.Stage) {
 		return fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage)
@@ -307,62 +297,4 @@ func isIPTransitionRequested(ipc *ipcv1.IPConfig) bool {
 	}
 	return !(controllerutils.IsIPStageCompletedOrFailed(ipc, desiredStage) ||
 		controllerutils.IsIPStageInProgress(ipc, desiredStage))
-}
-
-// validateSpecIPsInMachineNetworks ensures that, for each provided family, the given IP
-// is valid and contained within the provided machine network CIDR.
-func validateSpecIPsInMachineNetworks(ipc *ipcv1.IPConfig) error {
-	// IPv4 validation
-	if v := ipc.Spec.IPv4; v != nil {
-		hasAddr := v.Address != ""
-		hasNet := v.MachineNetwork != ""
-		if hasAddr != hasNet {
-			return fmt.Errorf("both IPv4 address and machineNetwork must be provided together")
-		}
-		if hasAddr {
-			ipStr := strings.Split(v.Address, "/")[0]
-			ip := net.ParseIP(ipStr)
-			if ip == nil || ip.To4() == nil {
-				return fmt.Errorf("invalid IPv4 address: %s", ipStr)
-			}
-			_, ipNet, err := net.ParseCIDR(v.MachineNetwork)
-			if err != nil {
-				return fmt.Errorf("invalid IPv4 machine network CIDR: %s", v.MachineNetwork)
-			}
-			if ipNet.IP.To4() == nil {
-				return fmt.Errorf("ipv4 machineNetwork must be an IPv4 CIDR: %s", v.MachineNetwork)
-			}
-			if !ipNet.Contains(ip) {
-				return fmt.Errorf("IPv4 address %s is not within machine network %s", ipStr, v.MachineNetwork)
-			}
-		}
-	}
-
-	if v := ipc.Spec.IPv6; v != nil {
-		hasAddr := v.Address != ""
-		hasNet := v.MachineNetwork != ""
-		if hasAddr != hasNet {
-			return fmt.Errorf("both IPv6 address and machineNetwork must be provided together")
-		}
-		if hasAddr {
-			addr := strings.Split(v.Address, "/")[0]
-			ipStr := strings.Trim(addr, "[]")
-			ip := net.ParseIP(ipStr)
-			if ip == nil || ip.To4() != nil {
-				return fmt.Errorf("invalid IPv6 address: %s", ipStr)
-			}
-			_, ipNet, err := net.ParseCIDR(v.MachineNetwork)
-			if err != nil {
-				return fmt.Errorf("invalid IPv6 machine network CIDR: %s", v.MachineNetwork)
-			}
-			if ipNet.IP.To4() != nil {
-				return fmt.Errorf("ipv6 machineNetwork must be an IPv6 CIDR: %s", v.MachineNetwork)
-			}
-			if !ipNet.Contains(ip) {
-				return fmt.Errorf("IPv6 address %s is not within machine network %s", ipStr, v.MachineNetwork)
-			}
-		}
-	}
-
-	return nil
 }

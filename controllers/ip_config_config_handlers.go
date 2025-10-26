@@ -21,7 +21,7 @@ import (
 
 type IPConfigConfigurationHandlerInterface interface {
 	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
-	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error)
+	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 }
 
 type IPConfigConfigurationHandler struct {
@@ -52,9 +52,13 @@ func NewIPConfigConfigurationHandler(
 }
 
 func (c *IPConfigConfigurationHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.SetIPConfigStatusInProgress(ipc, "IP configuration is in progress")
+	if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	if err := c.writeIPConfigRunConfig(ipc); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config run config: %s", err.Error()))
-
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -62,64 +66,44 @@ func (c *IPConfigConfigurationHandler) PrePivot(ctx context.Context, ipc *ipcv1.
 		return requeueWithError(fmt.Errorf("failed to write ip-config run config: %w", err))
 	}
 
-	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
-		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()))
-
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
-	}
-
-	log.FromContext(ctx).Info("Scheduling lca-cli ip-config run via systemd-run")
-	controllerutils.SetIPConfigStatusInProgress(ipc, "IP configuration is in progress")
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
-	args := []string{
-		"--property", "ExitType=cgroup",
-		"--unit", "lca-ipconfig-run",
-		"--description", "lifecycle-agent: ip-config run",
-		"lca-cli", "ip-config", "run",
-	}
-	if _, err := c.Executor.Execute("systemd-run", args...); err != nil {
+	if err := c.RunLcaCliIPConfigRun(logger); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config: %s", err.Error()))
-
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		return doNotRequeue(), fmt.Errorf("failed to schedule ip-config run: %w", err)
+		logger.Error(fmt.Errorf("failed to schedule ip-config run: %w", err), "failed to schedule ip-config run")
+		return doNotRequeue(), nil
 	}
 
 	// should not reach here on successful ip-config run
+
 	return doNotRequeue(), nil
 }
 
 // PreConfigure and PostConfigure were merged into PrePivot
 
-func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
-	log.FromContext(ctx).Info("Starting health check for different components")
-	if err := CheckHealth(ctx, c.NoncachedClient, log.FromContext(ctx)); err != nil {
-		controllerutils.SetIPConfigStatusInProgress(ipc, fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()))
-
+func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	logger.Info("Starting health check for different components")
+	if err := CheckHealth(ctx, c.NoncachedClient, logger); err != nil {
+		controllerutils.SetIPConfigStatusInProgress(
+			ipc,
+			fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()),
+		)
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		return requeueWithHealthCheckInterval(), nil
+		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 	}
 
 	controllerutils.SetIPConfigStatusInProgress(ipc, "Cluster has stabilized")
-
 	if err := c.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
 	if err := refreshCurrentIPs(ctx, ipc, c.NoncachedClient); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to refresh current IPs: %s", err.Error()))
-
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -129,7 +113,6 @@ func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1
 
 	if err := statusIPsMatchSpec(ipc); err != nil {
 		controllerutils.SetIPConfigStatusInProgress(ipc, fmt.Sprintf("Waiting for current IPs to match spec: %s", err.Error()))
-
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -138,9 +121,12 @@ func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1
 	}
 
 	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed")
-
 	if err := c.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	if err := c.RebootClient.DisableInitMonitor(); err != nil {
+		return requeueWithError(fmt.Errorf("failed to disable init monitor: %w", err))
 	}
 
 	return doNotRequeue(), nil
@@ -200,7 +186,12 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 // per-phase handlers for IPConfig run status
 func (r *IPConfigReconciler) handleConfigUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("Running IP config PrePivot handler")
-	return r.ConfigHandler.PrePivot(ctx, ipc, logger)
+	result, err := r.ConfigHandler.PrePivot(ctx, ipc, logger)
+	if err != nil {
+		return result, fmt.Errorf("failed to run PrePivot: %w", err)
+	}
+
+	return result, nil
 }
 
 func (r *IPConfigReconciler) handleConfigRunning(logger logr.Logger) (ctrl.Result, error) {
@@ -208,43 +199,57 @@ func (r *IPConfigReconciler) handleConfigRunning(logger logr.Logger) (ctrl.Resul
 	return requeueWithShortInterval(), nil
 }
 
-func (r *IPConfigReconciler) handleConfigFailed(ctx context.Context, ipc *ipcv1.IPConfig, message string) (ctrl.Result, error) {
+func (r *IPConfigReconciler) handleConfigFailed(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+	message string,
+) (ctrl.Result, error) {
 	controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("ip-config run failed: %s", message))
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
-	return doNotRequeue(), fmt.Errorf("ip-config run failed: %s", message)
+
+	logger.Error(fmt.Errorf("ip-config run failed: %s", message), "ip-config run failed")
+	return doNotRequeue(), nil
 }
 
 func (r *IPConfigReconciler) handleConfigSucceeded(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("Running IP config PostPivot handler")
-	result, err := r.ConfigHandler.PostPivot(ctx, ipc)
+	result, err := r.ConfigHandler.PostPivot(ctx, ipc, logger)
 	if err != nil {
-		return result, fmt.Errorf("failed to run PostPivot: %w", err)
+		return result, fmt.Errorf("post pivot failed: %w", err)
 	}
 
 	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed")
-
-	validNextStages, err := validNextStages(ipc, r.RPMOstreeClient)
-	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to get valid next stages: %w", err))
-	}
-	ipc.Status.ValidNextStages = validNextStages
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	logger.Info("PostPivot completed successfully")
+	logger.Info("config completed successfully")
 	return result, nil
 }
 
 func (r *IPConfigReconciler) handleConfig(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
-) (ctrl.Result, error) {
+) (res ctrl.Result, err error) {
 	logger := log.FromContext(ctx).WithName("IPConfigConfig")
 	logger.Info("Starting handleConfig")
+
+	if isIPTransitionRequested(ipc) {
+		if err := r.validateIPConfigStage(ipc); err != nil {
+			controllerutils.SetIPConfigStatusFailed(
+				ipc,
+				"invalid transition: "+string(ipc.Spec.Stage),
+			)
+			if err := r.Client.Status().Update(ctx, ipc); err != nil {
+				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+			}
+			return doNotRequeue(), nil
+		}
+	}
 
 	phase, message, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigRunStatusFile))
 	if err != nil {
@@ -257,7 +262,7 @@ func (r *IPConfigReconciler) handleConfig(
 	case common.IPConfigRunPhaseRunning:
 		return r.handleConfigRunning(logger)
 	case common.IPConfigRunPhaseFailed:
-		return r.handleConfigFailed(ctx, ipc, message)
+		return r.handleConfigFailed(ctx, ipc, logger, message)
 	case common.IPConfigRunPhaseSucceeded:
 		return r.handleConfigSucceeded(ctx, ipc, logger)
 	default:
@@ -303,6 +308,26 @@ func (c *IPConfigConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfi
 	}
 	if err := os.WriteFile(common.PathOutsideChroot(common.IPConfigRunFlagsFile), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write ip-config run config: %w", err)
+	}
+
+	return nil
+}
+
+// RunLcaCliIPConfigRun schedules an lca-cli ip-config run via systemd-run.
+func (c *IPConfigConfigurationHandler) RunLcaCliIPConfigRun(
+	logger logr.Logger,
+) error {
+	logger.Info("Scheduling lca-cli ip-config run via systemd-run")
+
+	args := []string{
+		"--property", "ExitType=cgroup",
+		"--unit", "lca-ipconfig-run",
+		"--description", "lifecycle-agent: ip-config run",
+		"lca-cli", "ip-config", "run",
+	}
+
+	if _, err := c.Executor.Execute("systemd-run", args...); err != nil {
+		return fmt.Errorf("failed to schedule lca-cli ip-config run: %w", err)
 	}
 
 	return nil

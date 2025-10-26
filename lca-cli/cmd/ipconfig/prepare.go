@@ -51,7 +51,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(ipRollbackScheme))
 	utilruntime.Must(mcfgv1.AddToScheme(ipRollbackScheme))
 
-	// subcommand is added by NewIPConfigCmd after globals are initialized
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv4, "ipv4-address", "", "New IPv4 address")
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv6, "ipv6-address", "", "New IPv6 address")
 }
@@ -90,7 +89,7 @@ func runIPConfigPrepare() error {
 
 	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-prepare", hostCommandsExecutor)
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
-	rbClient := reboot.NewRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
+	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
 	preparer := ipconfig.NewPrepareHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rbClient, client)
 	if err := common.WriteIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunStatus{
@@ -127,14 +126,8 @@ func runIPConfigPrepare() error {
 		return fmt.Errorf("failed to mark prepare as successful: %w", err)
 	}
 
-	hostExec := ops.NewNsenterExecutor(pkgLog, true)
-	if _, err := hostExec.Execute(
-		"systemd-run",
-		"--unit", "lca-ipconfig-prepare-reboot",
-		"--description", "lifecycle-agent: ip-config prepare reboot",
-		"systemctl", "reboot",
-	); err != nil {
-		return fmt.Errorf("failed to schedule reboot: %w", err)
+	if err := rbClient.RebootToNewStateRoot("ip-config prepare"); err != nil {
+		return fmt.Errorf("failed to reboot to new stateroot: %w", err)
 	}
 
 	return nil
