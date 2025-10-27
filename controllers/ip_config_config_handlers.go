@@ -19,6 +19,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const (
+	IPConfigConfigPhasePrepivot  = "ConfigPrePivot"
+	IPConfigConfigPhasePostpivot = "ConfigPostPivot"
+)
+
 type IPConfigConfigurationHandlerInterface interface {
 	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
@@ -52,10 +57,7 @@ func NewIPConfigConfigurationHandler(
 }
 
 func (c *IPConfigConfigurationHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetIPConfigStatusInProgress(ipc, "IP configuration is in progress")
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
+	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePrepivot)
 
 	if err := c.writeIPConfigRunConfig(ipc); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config run config: %s", err.Error()))
@@ -84,6 +86,7 @@ func (c *IPConfigConfigurationHandler) PrePivot(ctx context.Context, ipc *ipcv1.
 // PreConfigure and PostConfigure were merged into PrePivot
 
 func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePostpivot)
 	logger.Info("Starting health check for different components")
 	if err := CheckHealth(ctx, c.NoncachedClient, logger); err != nil {
 		controllerutils.SetIPConfigStatusInProgress(
@@ -120,14 +123,11 @@ func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed")
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
 	if err := c.RebootClient.DisableInitMonitor(); err != nil {
 		return requeueWithError(fmt.Errorf("failed to disable init monitor: %w", err))
 	}
+
+	controllerutils.StopIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePostpivot)
 
 	return doNotRequeue(), nil
 }
@@ -185,6 +185,11 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 
 // per-phase handlers for IPConfig run status
 func (r *IPConfigReconciler) handleConfigUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.SetIPConfigStatusInProgress(ipc, "IP configuration is in progress")
+	if err := r.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	logger.Info("Running IP config PrePivot handler")
 	result, err := r.ConfigHandler.PrePivot(ctx, ipc, logger)
 	if err != nil {
@@ -215,6 +220,8 @@ func (r *IPConfigReconciler) handleConfigFailed(
 }
 
 func (r *IPConfigReconciler) handleConfigSucceeded(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.StopIPPhase(r.Client, logger, ipc, IPConfigConfigPhasePrepivot)
+
 	logger.Info("Running IP config PostPivot handler")
 	result, err := r.ConfigHandler.PostPivot(ctx, ipc, logger)
 	if err != nil {
@@ -222,10 +229,10 @@ func (r *IPConfigReconciler) handleConfigSucceeded(ctx context.Context, ipc *ipc
 	}
 
 	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed")
-
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
+	controllerutils.StopIPStageHistory(r.Client, logger, ipc)
 
 	logger.Info("config completed successfully")
 	return result, nil

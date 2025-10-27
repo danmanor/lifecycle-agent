@@ -13,11 +13,15 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
+	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+const (
+	IPConfigPrepPhasePrepivot  string = "PrepPrePivot"
+	IPConfigPrepPhasePostpivot string = "PrepPostPivot"
 )
 
 type IPConfigPrepHandlerInterface interface {
@@ -31,8 +35,7 @@ type IPConfigPrepHandler struct {
 	Executor        ops.Execute
 	Ops             ops.Ops
 	RebootClient    reboot.RebootIntf
-	Scheme          *runtime.Scheme
-	Clientset       *kubernetes.Clientset
+	RPMOstreeClient rpmostreeclient.IClient
 }
 
 func NewIPConfigPrepHandler(
@@ -41,8 +44,7 @@ func NewIPConfigPrepHandler(
 	executor ops.Execute,
 	ops ops.Ops,
 	rebootClient reboot.RebootIntf,
-	scheme *runtime.Scheme,
-	clientset *kubernetes.Clientset,
+	rpmOstreeClient rpmostreeclient.IClient,
 ) IPConfigPrepHandlerInterface {
 	return &IPConfigPrepHandler{
 		Client:          client,
@@ -50,8 +52,7 @@ func NewIPConfigPrepHandler(
 		Executor:        executor,
 		Ops:             ops,
 		RebootClient:    rebootClient,
-		Scheme:          scheme,
-		Clientset:       clientset,
+		RPMOstreeClient: rpmOstreeClient,
 	}
 }
 
@@ -84,34 +85,40 @@ func (r *IPConfigReconciler) handlePrep(ctx context.Context, ipc *ipcv1.IPConfig
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
+		controllerutils.StopIPStageHistory(r.Client, logger, ipc)
 		logger.Info("Spec IPs already match current status")
 		return doNotRequeue(), nil
 	}
 
-	isBeforePivot := !isTargetStaterootBooted(ipc, r.RPMOstreeClient)
-
-	if isBeforePivot {
-		logger.Info("Running prep PrePivot handler")
-		return r.PrepHandler.PrePivot(ctx, ipc, logger)
-	}
-
-	logger.Info("Running prep PostPivot handler")
-	result, err := r.PrepHandler.PostPivot(ctx, ipc, logger)
+	phase, message, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigPrepareStatusFile))
 	if err != nil {
-		return result, fmt.Errorf("post pivot failed: %w", err)
+		controllerutils.SetIPPrepStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to read ip-config prepare status: %s", err.Error()),
+		)
+		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithError(fmt.Errorf("failed to read ip-config prepare status: %w", err))
 	}
 
-	controllerutils.SetIPPrepStatusCompleted(ipc, "Preparation completed")
-	if err := r.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	switch phase {
+	case common.IPConfigRunPhaseUnknown:
+		return r.handlePrepareUnknown(ctx, ipc, logger)
+	case common.IPConfigRunPhaseRunning:
+		return r.handlePrepareRunning(ctx, ipc)
+	case common.IPConfigRunPhaseFailed:
+		return r.handlePrepareFailed(ctx, ipc, logger, message)
+	case common.IPConfigRunPhaseSucceeded:
+		return r.handlePrepareSucceeded(ctx, ipc, logger)
+	default:
+		// should not reach here
+		return requeueWithError(fmt.Errorf("failed to handle ip-config prepare status: %s", phase))
 	}
-
-	logger.Info("Prepare completed successfully")
-
-	return result, nil
 }
 
 func (p *IPConfigPrepHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.StartIPPhase(p.Client, logger, ipc, IPConfigPrepPhasePrepivot)
 	if err := CheckHealth(ctx, p.NoncachedClient, logger.WithName("HealthCheck")); err != nil {
 		msg := fmt.Sprintf("Waiting for system to stabilize before starting preparation: %s", err.Error())
 		logger.Info(msg)
@@ -122,43 +129,7 @@ func (p *IPConfigPrepHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig,
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	phase, message, err := common.ReadIPConfigStatus(common.PathOutsideChroot(common.IPConfigPrepareStatusFile))
-	if err != nil {
-		controllerutils.SetIPPrepStatusFailed(
-			ipc,
-			fmt.Sprintf("failed to read ip-config prepare status: %s", err.Error()),
-		)
-		if err := p.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-		return requeueWithError(fmt.Errorf("failed to read ip-config prepare status: %w", err))
-	}
-
-	switch phase {
-	case common.IPConfigRunPhaseUnknown:
-		return p.handlePrepareUnknown(ctx, ipc, logger)
-	case common.IPConfigRunPhaseRunning:
-		return p.handlePrepareRunning(ctx, ipc)
-	case common.IPConfigRunPhaseFailed:
-		return p.handlePrepareFailed(ctx, ipc, logger, message)
-	case common.IPConfigRunPhaseSucceeded:
-		return p.handlePrepareSucceeded(ctx, ipc, logger)
-	default:
-		return requeueWithShortInterval(), nil
-	}
-}
-
-func (p *IPConfigPrepHandler) handlePrepareUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetIPPrepStatusInProgress(
-		ipc,
-		"IP configuration preparation is in progress",
-	)
-	if err := p.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
 	ipv4Addr, ipv6Addr := getIPAddresses(ipc)
-
 	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
 		controllerutils.SetIPPrepStatusFailed(
 			ipc,
@@ -184,10 +155,30 @@ func (p *IPConfigPrepHandler) handlePrepareUnknown(ctx context.Context, ipc *ipc
 
 	// should not reach here on successful ip-config prepare
 
-	return doNotRequeue(), nil
+	return requeueWithShortInterval(), nil
 }
 
-func (p *IPConfigPrepHandler) handlePrepareRunning(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
+func (p *IPConfigReconciler) handlePrepareUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.SetIPPrepStatusInProgress(
+		ipc,
+		"IP configuration preparation is in progress",
+	)
+	if err := p.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	logger.Info("Running IP config Prep PrePivot handler")
+	result, err := p.PrepHandler.PrePivot(ctx, ipc, logger)
+	if err != nil {
+		return result, fmt.Errorf("failed to run prep PrePivot: %w", err)
+	}
+
+	// should not reach here on successful ip-config prepare
+
+	return result, err
+}
+
+func (p *IPConfigReconciler) handlePrepareRunning(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
 	controllerutils.SetIPPrepStatusInProgress(ipc, "ip-config prepare in progress")
 	if err := p.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -195,7 +186,7 @@ func (p *IPConfigPrepHandler) handlePrepareRunning(ctx context.Context, ipc *ipc
 	return requeueWithShortInterval(), nil
 }
 
-func (p *IPConfigPrepHandler) handlePrepareFailed(
+func (p *IPConfigReconciler) handlePrepareFailed(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
@@ -214,41 +205,33 @@ func (p *IPConfigPrepHandler) handlePrepareFailed(
 	return doNotRequeue(), nil
 }
 
-func (p *IPConfigPrepHandler) handlePrepareSucceeded(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetIPPrepStatusInProgress(
-		ipc,
-		"ip-config prepare completed. Rebooting to new stateroot",
-	)
+func (p *IPConfigReconciler) handlePrepareSucceeded(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.StopIPPhase(p.Client, logger, ipc, IPConfigPrepPhasePrepivot)
+
+	logger.Info("Running IP config Prep PostPivot handler")
+	result, err := p.PrepHandler.PostPivot(ctx, ipc, logger)
+	if err != nil {
+		return result, fmt.Errorf("failed to run prep PostPivot: %w", err)
+	}
+
+	controllerutils.SetIPPrepStatusCompleted(ipc, "Preparation completed")
 	if err := p.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
+	controllerutils.StopIPStageHistory(p.Client, logger, ipc)
 
-	if p.RebootClient == nil {
-		controllerutils.SetIPPrepStatusFailed(
-			ipc,
-			"reboot client is not set",
-		)
-		if err := p.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-		return requeueWithError(fmt.Errorf("reboot client is not set"))
-	}
+	logger.Info("IP configuration preparation completed successfully")
 
-	logger.Info("PrePivot Completed. Rebooting to new stateroot")
-	if err := p.RebootClient.RebootToNewStateRoot("ip-config"); err != nil {
-		controllerutils.SetIPPrepStatusFailed(
-			ipc,
-			fmt.Sprintf("failed to reboot to new stateroot: %s", err.Error()),
-		)
-		if err := p.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-		return requeueWithError(fmt.Errorf("failed to reboot to new stateroot: %w", err))
-	}
-	return doNotRequeue(), nil
+	return result, err
 }
 
 func (p *IPConfigPrepHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.StartIPPhase(p.Client, logger, ipc, IPConfigPrepPhasePostpivot)
+	isAfterPivot := isTargetStaterootBooted(ipc, p.RPMOstreeClient)
+	if !isAfterPivot {
+		return requeueWithError(fmt.Errorf("ip-config prepare cli command succeeded but stateroot is not booted"))
+	}
+
 	log.FromContext(ctx).Info("Starting health check for different components")
 	if err := CheckHealth(ctx, p.NoncachedClient, logger); err != nil {
 		controllerutils.SetIPPrepStatusInProgress(ipc, fmt.Sprintf("Waiting for system to stabilize in new stateroot: %s", err.Error()))
@@ -256,7 +239,8 @@ func (p *IPConfigPrepHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		return requeueWithHealthCheckInterval(), fmt.Errorf("Waiting for system to stabilize in new stateroot: %s", err.Error())
+		return requeueWithHealthCheckInterval(),
+			fmt.Errorf("waiting for system to stabilize in new stateroot: %s", err.Error())
 	}
 
 	if err := p.startIPConfigInitMonitor(ipc, logger); err != nil {
@@ -267,6 +251,10 @@ func (p *IPConfigPrepHandler) PostPivot(ctx context.Context, ipc *ipcv1.IPConfig
 	if err := p.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
+
+	controllerutils.StopIPPhase(p.Client, logger, ipc, IPConfigPrepPhasePostpivot)
+
+	logger.Info("Prepare completed successfully")
 
 	return doNotRequeue(), nil
 }
@@ -419,7 +407,7 @@ func validateNetworkSpec(ipc *ipcv1.IPConfig) error {
 }
 
 // RunLcaCliIPConfigPrepare schedules an lca-cli ip-config prepare via systemd-run.
-func (c *IPConfigPrepHandler) RunLcaCliIPConfigPrepare(
+func (p *IPConfigPrepHandler) RunLcaCliIPConfigPrepare(
 	logger logr.Logger,
 	ipv4Addr string,
 	ipv6Addr string,
@@ -440,7 +428,7 @@ func (c *IPConfigPrepHandler) RunLcaCliIPConfigPrepare(
 		args = append(args, "--ipv6-address", ipv6Addr)
 	}
 
-	if _, err := c.Executor.Execute("systemd-run", args...); err != nil {
+	if _, err := p.Executor.Execute("systemd-run", args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
 	}
 

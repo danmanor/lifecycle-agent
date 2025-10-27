@@ -167,6 +167,10 @@ type IPConfigStatus struct {
 	// ClusterIPs reflects the node internal IPs known to the cluster
 	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Cluster IPs"
 	ClusterIPs *ClusterIPsStatus `json:"clusterIPs,omitempty"`
+
+	// History stores timing info of different IPConfig stages and their important phases
+	// +optional
+	History []*IPHistory `json:"history,omitempty"`
 }
 
 // HostNetworkStatus summarizes current host network
@@ -185,6 +189,28 @@ type ClusterIPsStatus struct {
 type FamilyIP struct {
 	Family  string `json:"family"`
 	Address string `json:"address"`
+}
+
+// IPHistory mirrors IBU history for IPConfig stages
+type IPHistory struct {
+	// Stage The desired stage name read from spec
+	Stage IPConfigStage `json:"stage,omitempty"`
+	// Phases allows a granular view of important tasks within a Stage
+	Phases []*IPPhase `json:"phases,omitempty"`
+	// StartTime A timestamp to indicate the Stage has started
+	StartTime metav1.Time `json:"startTime,omitempty"`
+	// CompletionTime A timestamp indicating the Stage completed successfully
+	CompletionTime metav1.Time `json:"completionTime,omitempty"`
+}
+
+// IPPhase represents a sub-step within a stage
+type IPPhase struct {
+	// Phase current phase within a Stage
+	Phase string `json:"phase,omitempty"`
+	// StartTime A timestamp indicating the Phase has started
+	StartTime metav1.Time `json:"startTime,omitempty"`
+	// CompletionTime A timestamp indicating the phase completed successfully
+	CompletionTime metav1.Time `json:"completionTime,omitempty"`
 }
 
 func init() {

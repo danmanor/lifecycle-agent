@@ -48,28 +48,26 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		}
 	}
 
-	finalizeRequested, abortRequested := r.computeIdleIntent(ipc)
-	logger.Info("Idle requested for finalize; running health checks")
-	if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
-		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
-		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
-			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-			return res, ierr
+	finalizeRequested, _ := r.computeIdleIntent(ipc)
+
+	if finalizeRequested {
+		logger.Info("Idle requested for finalize; running health checks")
+		if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
+			msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
+			controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
+			if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
+				res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+				return res, ierr
+			}
+			return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 		}
-		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 	}
 
-	if err := r.Ops.RemountSysroot(); err != nil {
-		reason := controllerutils.ConditionReasons.FinalizeFailed
-		if abortRequested && !finalizeRequested {
-			reason = controllerutils.ConditionReasons.AbortFailed
-		}
+	if err := r.cleanup(logger); err != nil {
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
-			reason,
-			fmt.Sprintf(
-				"failed to remount sysroot: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
+			controllerutils.ConditionReasons.FinalizeFailed,
+			fmt.Sprintf("failed to cleanup: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
 				err,
 				controllerutils.ManualCleanupAnnotation,
 			),
@@ -77,29 +75,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
-
-		return requeueWithError(fmt.Errorf("failed to remount sysroot: %w", err))
-	}
-
-	if err := r.cleanuoUnbootedStateroots(logger); err != nil {
-		reason := controllerutils.ConditionReasons.FinalizeFailed
-		if abortRequested && !finalizeRequested {
-			reason = controllerutils.ConditionReasons.AbortFailed
-		}
-		controllerutils.SetIPIdleStatusFalse(
-			ipc,
-			reason,
-			fmt.Sprintf(
-				"failed to clean up unbooted stateroots: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
-				err,
-				controllerutils.ManualCleanupAnnotation,
-			),
-		)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-		}
-
-		return requeueWithError(fmt.Errorf("failed to clean up unbooted stateroots: %w", err))
+		return requeueWithError(fmt.Errorf("failed to cleanup: %w", err))
 	}
 
 	lcaHostCopy := common.PathOutsideChroot("/var/usrlocal/bin/lca-cli")
@@ -107,38 +83,13 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
 			controllerutils.ConditionReasons.FinalizeFailed,
-			fmt.Sprintf(
-				"failed to remove temporary lca-cli host copy: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
-				err,
-				controllerutils.ManualCleanupAnnotation,
-			),
+			fmt.Sprintf("failed to remove temporary lca-cli host copy: %v.", err),
 		)
-
 		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
 
 		return requeueWithError(fmt.Errorf("failed to remove temporary lca-cli host copy: %w", err))
-	}
-
-	if err := cleanupIPConfigFiles(); err != nil {
-		reason := controllerutils.ConditionReasons.FinalizeFailed
-		if abortRequested && !finalizeRequested {
-			reason = controllerutils.ConditionReasons.AbortFailed
-		}
-		controllerutils.SetIPIdleStatusFalse(
-			ipc,
-			reason,
-			fmt.Sprintf(
-				"failed to cleanup workspace: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
-				err,
-				controllerutils.ManualCleanupAnnotation,
-			),
-		)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-		}
-		return requeueWithError(fmt.Errorf("failed to cleanup workspace: %w", err))
 	}
 
 	controllerutils.ResetStatusConditions(&ipc.Status.Conditions, ipc.Generation)
@@ -149,6 +100,22 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	logger.Info("handleIdle completed successfully")
 
 	return doNotRequeue(), nil
+}
+
+func (r *IPConfigReconciler) cleanup(logger logr.Logger) error {
+	if err := r.Ops.RemountSysroot(); err != nil {
+		return fmt.Errorf("failed to remount sysroot: %w", err)
+	}
+
+	if err := r.cleanuoUnbootedStateroots(logger); err != nil {
+		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
+	}
+
+	if err := cleanupIPConfigFiles(); err != nil {
+		return fmt.Errorf("failed to cleanup workspace: %w", err)
+	}
+
+	return nil
 }
 
 // computeIdleIntent figures out whether we should finalize (post-pivot or configure completed)

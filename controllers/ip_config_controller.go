@@ -103,6 +103,11 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
 	}
 
+	// Start stage history timer. The timer is stopped from inside the handlers when they complete successfully
+	controllerutils.StartIPStageHistory(r.Client, logger, ipc)
+	// .status.history is reset as long as the desired stage is Idle
+	controllerutils.ResetIPHistory(r.Client, logger, ipc)
+
 	switch ipc.Spec.Stage {
 	case ipcv1.IPStages.Idle:
 		return r.handleIdle(ctx, ipc)

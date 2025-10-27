@@ -329,8 +329,7 @@ func main() {
 			executor,
 			op,
 			ipcRebootClient,
-			mgr.GetScheme(),
-			clientset,
+			rpmOstreeClient,
 		),
 		ConfigHandler: controllers.NewIPConfigConfigurationHandler(
 			mgr.GetClient(),
