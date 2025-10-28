@@ -47,6 +47,10 @@ var (
 	ipv4MachineNetwork string
 	ipv6Address        string
 	ipv6MachineNetwork string
+	ipv4Gateway        string
+	ipv6Gateway        string
+	ipv4DNS            string
+	ipv6DNS            string
 	httpProxy          string
 	httpsProxy         string
 	noProxy            string
@@ -66,6 +70,10 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&ipv4MachineNetwork, "ipv4-machine-network", "", "Target IPv4 machine network CIDR")
 	ipConfigRunCmd.Flags().StringVar(&ipv6Address, "ipv6-address", "", "Target IPv6 address")
 	ipConfigRunCmd.Flags().StringVar(&ipv6MachineNetwork, "ipv6-machine-network", "", "Target IPv6 machine network CIDR")
+	ipConfigRunCmd.Flags().StringVar(&ipv4Gateway, "ipv4-gateway", "", "IPv4 default gateway")
+	ipConfigRunCmd.Flags().StringVar(&ipv6Gateway, "ipv6-gateway", "", "IPv6 default gateway")
+	ipConfigRunCmd.Flags().StringVar(&ipv4DNS, "ipv4-dns", "", "IPv4 DNS server")
+	ipConfigRunCmd.Flags().StringVar(&ipv6DNS, "ipv6-dns", "", "IPv6 DNS server")
 	ipConfigRunCmd.Flags().StringVar(&httpProxy, "http-proxy", "", "HTTP proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
@@ -100,6 +108,10 @@ func runIPConfigChange() error {
 			ipv4MachineNetwork = cfg.IPv4MachineNetwork
 			ipv6Address = cfg.IPv6Address
 			ipv6MachineNetwork = cfg.IPv6MachineNetwork
+			ipv4Gateway = cfg.IPv4Gateway
+			ipv6Gateway = cfg.IPv6Gateway
+			ipv4DNS = cfg.IPv4DNSServer
+			ipv6DNS = cfg.IPv6DNSServer
 			httpProxy = cfg.HTTPProxy
 			httpsProxy = cfg.HTTPSProxy
 			noProxy = cfg.NoProxy
@@ -120,7 +132,11 @@ func runIPConfigChange() error {
 		return err
 	}
 
-	ipConfigs := buildIPConfigs(ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork, effectivePrimary)
+	ipConfigs := buildIPConfigs(
+		ipv4Address, ipv4MachineNetwork, ipv4Gateway, ipv4DNS,
+		ipv6Address, ipv6MachineNetwork, ipv6Gateway, ipv6DNS,
+		effectivePrimary,
+	)
 
 	var hostCommandsExecutor ops.Execute
 	if _, err := os.Stat(common.Host); err == nil {
@@ -260,15 +276,19 @@ func inferPrimaryStack(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) (string, err
 }
 
 // buildIPConfigs creates the ordered slice of NetworkIPConfig with primary first.
-func buildIPConfigs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net, primary string) []*ipconfig.NetworkIPConfig {
+func buildIPConfigs(
+	ipv4Addr, ipv4Net, ipv4Gw, ipv4DNS string,
+	ipv6Addr, ipv6Net, ipv6Gw, ipv6DNS string,
+	primary string,
+) []*ipconfig.NetworkIPConfig {
 	var ipv4Config *ipconfig.NetworkIPConfig
 	if ipv4Addr != "" && ipv4Net != "" {
-		ipv4Config = &ipconfig.NetworkIPConfig{IP: ipv4Addr, MachineNetwork: ipv4Net}
+		ipv4Config = &ipconfig.NetworkIPConfig{IP: ipv4Addr, MachineNetwork: ipv4Net, Gateway: ipv4Gw, DNSServer: ipv4DNS}
 	}
 
 	var ipv6Config *ipconfig.NetworkIPConfig
 	if ipv6Addr != "" && ipv6Net != "" {
-		ipv6Config = &ipconfig.NetworkIPConfig{IP: ipv6Addr, MachineNetwork: ipv6Net}
+		ipv6Config = &ipconfig.NetworkIPConfig{IP: ipv6Addr, MachineNetwork: ipv6Net, Gateway: ipv6Gw, DNSServer: ipv6DNS}
 	}
 
 	ipConfigs := []*ipconfig.NetworkIPConfig{}

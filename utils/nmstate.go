@@ -38,6 +38,8 @@ type IPConfig struct {
 	PrefixLen   int
 	Enabled     bool
 	DHCPEnabled bool
+	Gateway     string
+	DNSServer   string
 }
 
 // NMStateTemplateData represents the template data for NMState YAML generation
@@ -95,7 +97,15 @@ func GenerateNMStateYAML(config *NMStateConfig) (string, error) {
 
 // GenerateNMState generates NMState YAML from IPs and their machine network CIDRs.
 // It derives the prefix length from the provided CIDRs.
-func GenerateNMState(interfaceName string, ips []string, machineNetworks []string) (string, error) {
+func GenerateNMState(
+	interfaceName string,
+	ips []string,
+	machineNetworks []string,
+	ipv4Gateway string,
+	ipv6Gateway string,
+	ipv4DNS string,
+	ipv6DNS string,
+) (string, error) {
 	if len(ips) == 0 {
 		return "", fmt.Errorf("at least one IP address is required")
 	}
@@ -103,9 +113,7 @@ func GenerateNMState(interfaceName string, ips []string, machineNetworks []strin
 		return "", fmt.Errorf("ips and machineNetworks must be same length")
 	}
 
-	config := &NMStateConfig{
-		InterfaceName: interfaceName,
-	}
+	config := &NMStateConfig{InterfaceName: interfaceName}
 
 	for idx, ip := range ips {
 		cidr := machineNetworks[idx]
@@ -134,6 +142,15 @@ func GenerateNMState(interfaceName string, ips []string, machineNetworks []strin
 				}
 			}
 		}
+	}
+
+	if config.IPv4Config != nil {
+		config.IPv4Config.Gateway = ipv4Gateway
+		config.IPv4Config.DNSServer = ipv4DNS
+	}
+	if config.IPv6Config != nil {
+		config.IPv6Config.Gateway = ipv6Gateway
+		config.IPv6Config.DNSServer = ipv6DNS
 	}
 
 	return GenerateNMStateYAML(config)

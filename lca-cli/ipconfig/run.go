@@ -28,20 +28,21 @@ import (
 type NetworkIPConfig struct {
 	IP             string
 	MachineNetwork string
+	Gateway        string
+	DNSServer      string
 }
 
 // IPConfig handles the IP change process
 type IPConfigHandler struct {
-	log             *logrus.Logger
-	ops             ops.Ops
-	executor        ops.Execute
-	recertImage     string
-	workingDir      string
-	IPConfigs       []*NetworkIPConfig
-	runtimeClient   runtimeclient.Client
-	Proxy           *ProxyConfig
-	PullSecretFile  string
-	DisabledService string
+	log            *logrus.Logger
+	ops            ops.Ops
+	executor       ops.Execute
+	recertImage    string
+	workingDir     string
+	IPConfigs      []*NetworkIPConfig
+	runtimeClient  runtimeclient.Client
+	Proxy          *ProxyConfig
+	PullSecretFile string
 }
 
 // NewIPConfig creates a new IPConfig instance
@@ -78,7 +79,10 @@ type ProxyConfig struct {
 func (i *IPConfigHandler) RunIPConfigChange() error {
 	i.log.Infof("Starting IP config process")
 	for _, ipConfig := range i.IPConfigs {
-		i.log.Infof("Changing IP to %s, machine network to %s", ipConfig.IP, ipConfig.MachineNetwork)
+		i.log.Infof(
+			"Changing IP to %s, machine network to %s, gateway to %s, DNS server to %s",
+			ipConfig.IP, ipConfig.MachineNetwork, ipConfig.Gateway, ipConfig.DNSServer,
+		)
 	}
 
 	ctx := context.Background()
@@ -373,12 +377,36 @@ func (i *IPConfigHandler) removeStaleFilesForRegeneration() error {
 func (i *IPConfigHandler) createMachineConfig(interfaceName string) (*machineconfigv1.MachineConfig, error) {
 	newIPs := make([]string, len(i.IPConfigs))
 	newMachineNetworks := make([]string, len(i.IPConfigs))
+	var ipv4Gw, ipv6Gw, ipv4DNS, ipv6DNS string
 	for i, cfg := range i.IPConfigs {
 		newIPs[i] = cfg.IP
 		newMachineNetworks[i] = cfg.MachineNetwork
+		if strings.Contains(cfg.IP, ":") {
+			if cfg.Gateway != "" {
+				ipv6Gw = cfg.Gateway
+			}
+			if cfg.DNSServer != "" {
+				ipv6DNS = cfg.DNSServer
+			}
+		} else {
+			if cfg.Gateway != "" {
+				ipv4Gw = cfg.Gateway
+			}
+			if cfg.DNSServer != "" {
+				ipv4DNS = cfg.DNSServer
+			}
+		}
 	}
 
-	nmstateConfig, err := utils.GenerateNMState(interfaceName, newIPs, newMachineNetworks)
+	nmstateConfig, err := utils.GenerateNMState(
+		interfaceName,
+		newIPs,
+		newMachineNetworks,
+		ipv4Gw,
+		ipv6Gw,
+		ipv4DNS,
+		ipv6DNS,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate NMState config: %w", err)
 	}

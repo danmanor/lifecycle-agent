@@ -288,6 +288,12 @@ func (c *IPConfigConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfi
 		if v.MachineNetwork != "" {
 			cfg.IPv4MachineNetwork = v.MachineNetwork
 		}
+		if v.Gateway != "" {
+			cfg.IPv4Gateway = v.Gateway
+		}
+		if v.DNSServer != "" {
+			cfg.IPv4DNSServer = v.DNSServer
+		}
 	}
 	if v := ipc.Spec.IPv6; v != nil {
 		if v.Address != "" {
@@ -295,6 +301,12 @@ func (c *IPConfigConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfi
 		}
 		if v.MachineNetwork != "" {
 			cfg.IPv6MachineNetwork = v.MachineNetwork
+		}
+		if v.Gateway != "" {
+			cfg.IPv6Gateway = v.Gateway
+		}
+		if v.DNSServer != "" {
+			cfg.IPv6DNSServer = v.DNSServer
 		}
 	}
 	if p := ipc.Spec.Proxy; p != nil {

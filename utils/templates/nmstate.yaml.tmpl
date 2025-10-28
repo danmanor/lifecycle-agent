@@ -39,3 +39,26 @@ interfaces:
     - ip: {{ .IPv6.Address }}
       prefix-length: {{ .IPv6.PrefixLen }}
     auto-route-metric: 48{{ end }}
+{{- if or .IPv4.Gateway .IPv6.Gateway .IPv4.DNSServer .IPv6.DNSServer }}
+routes:
+  config:
+  {{- if .IPv4.Gateway }}
+  - destination: 0.0.0.0/0
+    next-hop-interface: br-ex
+    next-hop-address: {{ .IPv4.Gateway }}
+  {{- end }}
+  {{- if .IPv6.Gateway }}
+  - destination: ::/0
+    next-hop-interface: br-ex
+    next-hop-address: {{ .IPv6.Gateway }}
+  {{- end }}
+dns-resolver:
+  config:
+    server:
+    {{- if .IPv4.DNSServer }}
+    - {{ .IPv4.DNSServer }}
+    {{- end }}
+    {{- if .IPv6.DNSServer }}
+    - {{ .IPv6.DNSServer }}
+    {{- end }}
+{{- end }}

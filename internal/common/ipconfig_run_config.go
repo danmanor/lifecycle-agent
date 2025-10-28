@@ -5,6 +5,10 @@ type IPConfigRunConfig struct {
 	IPv4MachineNetwork string `json:"ipv4-machine-network,omitempty"`
 	IPv6Address        string `json:"ipv6-address,omitempty"`
 	IPv6MachineNetwork string `json:"ipv6-machine-network,omitempty"`
+	IPv4Gateway        string `json:"ipv4-gateway,omitempty"`
+	IPv6Gateway        string `json:"ipv6-gateway,omitempty"`
+	IPv4DNSServer      string `json:"ipv4-dns,omitempty"`
+	IPv6DNSServer      string `json:"ipv6-dns,omitempty"`
 	HTTPProxy          string `json:"http-proxy,omitempty"`
 	HTTPSProxy         string `json:"https-proxy,omitempty"`
 	NoProxy            string `json:"no-proxy,omitempty"`
