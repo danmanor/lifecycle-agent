@@ -49,7 +49,6 @@ import (
 
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	seedgenv1 "github.com/openshift-kni/lifecycle-agent/api/seedgenerator/v1"
-	configv1 "github.com/openshift/api/config/v1"
 	ocpV1 "github.com/openshift/api/config/v1"
 	mcv1 "github.com/openshift/api/machineconfiguration/v1"
 	operatorv1alpha1 "github.com/openshift/api/operator/v1alpha1"
@@ -147,7 +146,7 @@ func main() {
 		&ocpV1.Infrastructure{},
 	)
 
-	le := leaderelection.LeaderElectionSNOConfig(configv1.LeaderElection{})
+	le := leaderelection.LeaderElectionSNOConfig(ocpV1.LeaderElection{})
 
 	mux := &sync.Mutex{}
 
@@ -319,36 +318,49 @@ func main() {
 		Client:          mgr.GetClient(),
 		NoncachedClient: mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
-		Executor:        chrootExecutor,
 		ChrootOps:       chrootOp,
 		NsenterOps:      nsenterOp,
 		RebootClient:    ipcRebootClient,
 		OstreeClient:    ostreeClient,
 		RPMOstreeClient: rpmOstreeClient,
 		Mux:             mux,
-		PrepHandler: controllers.NewIPConfigPrepHandler(
+		IdleHandler: controllers.NewIPConfigIdleStageHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
-			chrootExecutor,
 			chrootOp,
-			ipcRebootClient,
-			rpmOstreeClient,
-		),
-		ConfigHandler: controllers.NewIPConfigConfigurationHandler(
-			mgr.GetClient(),
-			mgr.GetAPIReader(),
-			chrootExecutor,
-			chrootOp,
-			ipcRebootClient,
 			ostreeClient,
+			rpmOstreeClient,
 		),
-		RollbackHandler: controllers.NewIPConfigRollbackHandler(
+		PrepHandler: controllers.NewIPConfigPrepStageHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
-			rpmOstreeClient,
-			chrootExecutor,
 			chrootOp,
-			ipcRebootClient,
+			controllers.NewIPConfigTwoPhasePrepHandler(
+				mgr.GetClient(),
+				mgr.GetAPIReader(),
+				chrootOp,
+				rpmOstreeClient,
+			),
+		),
+		ConfigHandler: controllers.NewIPConfigConfigStageHandler(
+			mgr.GetClient(),
+			chrootOp,
+			controllers.NewIPConfigTwoPhaseConfigurationHandler(
+				mgr.GetClient(),
+				mgr.GetAPIReader(),
+				chrootOp,
+				ipcRebootClient,
+			),
+		),
+		RollbackHandler: controllers.NewIPConfigRollbackStageHandler(
+			mgr.GetClient(),
+			chrootOp,
+			controllers.NewIPConfigTwoPhaseRollbackHandler(
+				mgr.GetClient(),
+				mgr.GetAPIReader(),
+				rpmOstreeClient,
+				chrootOp,
+			),
 		),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPConfig")

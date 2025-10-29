@@ -9,6 +9,7 @@
 package ops
 
 import (
+	os "os"
 	reflect "reflect"
 
 	logrus "github.com/sirupsen/logrus"
@@ -197,6 +198,20 @@ func (mr *MockOpsMockRecorder) IsImageMounted(img any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsImageMounted", reflect.TypeOf((*MockOps)(nil).IsImageMounted), img)
 }
 
+// IsNotExist mocks base method.
+func (m *MockOps) IsNotExist(err error) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsNotExist", err)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsNotExist indicates an expected call of IsNotExist.
+func (mr *MockOpsMockRecorder) IsNotExist(err any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsNotExist", reflect.TypeOf((*MockOps)(nil).IsNotExist), err)
+}
+
 // ListBlockDevices mocks base method.
 func (m *MockOps) ListBlockDevices() ([]BlockDevice, error) {
 	m.ctrl.T.Helper()
@@ -241,18 +256,34 @@ func (mr *MockOpsMockRecorder) MountImage(img any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MountImage", reflect.TypeOf((*MockOps)(nil).MountImage), img)
 }
 
-// Reboot mocks base method.
-func (m *MockOps) Reboot() error {
+// ReadDir mocks base method.
+func (m *MockOps) ReadDir(path string) ([]os.DirEntry, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Reboot")
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "ReadDir", path)
+	ret0, _ := ret[0].([]os.DirEntry)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
-// Reboot indicates an expected call of Reboot.
-func (mr *MockOpsMockRecorder) Reboot() *gomock.Call {
+// ReadDir indicates an expected call of ReadDir.
+func (mr *MockOpsMockRecorder) ReadDir(path any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reboot", reflect.TypeOf((*MockOps)(nil).Reboot))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadDir", reflect.TypeOf((*MockOps)(nil).ReadDir), path)
+}
+
+// ReadFile mocks base method.
+func (m *MockOps) ReadFile(filename string) ([]byte, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReadFile", filename)
+	ret0, _ := ret[0].([]byte)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ReadFile indicates an expected call of ReadFile.
+func (mr *MockOpsMockRecorder) ReadFile(filename any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadFile", reflect.TypeOf((*MockOps)(nil).ReadFile), filename)
 }
 
 // RecertFullFlow mocks base method.
@@ -300,6 +331,34 @@ func (m *MockOps) RemountSysroot() error {
 func (mr *MockOpsMockRecorder) RemountSysroot() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemountSysroot", reflect.TypeOf((*MockOps)(nil).RemountSysroot))
+}
+
+// RemoveAllFiles mocks base method.
+func (m *MockOps) RemoveAllFiles(path string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RemoveAllFiles", path)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RemoveAllFiles indicates an expected call of RemoveAllFiles.
+func (mr *MockOpsMockRecorder) RemoveAllFiles(path any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoveAllFiles", reflect.TypeOf((*MockOps)(nil).RemoveAllFiles), path)
+}
+
+// RemoveFile mocks base method.
+func (m *MockOps) RemoveFile(path string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RemoveFile", path)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RemoveFile indicates an expected call of RemoveFile.
+func (mr *MockOpsMockRecorder) RemoveFile(path any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoveFile", reflect.TypeOf((*MockOps)(nil).RemoveFile), path)
 }
 
 // RestoreOriginalSeedCrypto mocks base method.
@@ -417,6 +476,21 @@ func (mr *MockOpsMockRecorder) SetupContainersFolderCommands() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetupContainersFolderCommands", reflect.TypeOf((*MockOps)(nil).SetupContainersFolderCommands))
 }
 
+// StatFile mocks base method.
+func (m *MockOps) StatFile(name string) (os.FileInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StatFile", name)
+	ret0, _ := ret[0].(os.FileInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// StatFile indicates an expected call of StatFile.
+func (mr *MockOpsMockRecorder) StatFile(name any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StatFile", reflect.TypeOf((*MockOps)(nil).StatFile), name)
+}
+
 // StopClusterServices mocks base method.
 func (m *MockOps) StopClusterServices() error {
 	m.ctrl.T.Helper()
@@ -491,6 +565,20 @@ func (m *MockOps) UnmountAndRemoveImage(img string) error {
 func (mr *MockOpsMockRecorder) UnmountAndRemoveImage(img any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UnmountAndRemoveImage", reflect.TypeOf((*MockOps)(nil).UnmountAndRemoveImage), img)
+}
+
+// WriteFile mocks base method.
+func (m *MockOps) WriteFile(filename string, data []byte, perm os.FileMode) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WriteFile", filename, data, perm)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// WriteFile indicates an expected call of WriteFile.
+func (mr *MockOpsMockRecorder) WriteFile(filename, data, perm any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteFile", reflect.TypeOf((*MockOps)(nil).WriteFile), filename, data, perm)
 }
 
 // waitForEtcd mocks base method.

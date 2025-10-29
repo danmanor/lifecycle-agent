@@ -28,7 +28,14 @@ type PrepareHandler struct {
 	k8s    runtimeclient.Client
 }
 
-func NewPrepareHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClient, rpm rpmOstree.IClient, reboot reboot.RebootIntf, k8s runtimeclient.Client) *PrepareHandler {
+func NewPrepareHandler(
+	log *logrus.Logger,
+	ops ops.Ops,
+	ostree intOstree.IClient,
+	rpm rpmOstree.IClient,
+	reboot reboot.RebootIntf,
+	k8s runtimeclient.Client,
+) *PrepareHandler {
 	return &PrepareHandler{log: log, ops: ops, ostree: ostree, rpm: rpm, reboot: reboot, k8s: k8s}
 }
 
@@ -44,7 +51,7 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		return
 	}
 
-	kargs, err := fetchCurrentKernelArgs()
+	kargs, err := p.fetchCurrentKernelArgs()
 	if err != nil {
 		err = fmt.Errorf("failed to get current kernel args: %w", err)
 		return
@@ -264,7 +271,7 @@ func (p *PrepareHandler) copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymen
 	return nil
 }
 
-func fetchCurrentKernelArgs() ([]string, error) {
+func (p *PrepareHandler) fetchCurrentKernelArgs() ([]string, error) {
 	var (
 		data []byte
 		err  error

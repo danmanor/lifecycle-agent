@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,15 +10,45 @@ import (
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
+	"github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
+	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig) (res ctrl.Result, err error) {
+type IPConfigIdleStageHandler struct {
+	Client          client.Client
+	NoncachedClient client.Reader
+	ChrootOps       ops.Ops
+	OstreeClient    ostreeclient.IClient
+	RPMOstreeClient rpmostreeclient.IClient
+}
+
+func NewIPConfigIdleStageHandler(
+	client client.Client,
+	noncachedClient client.Reader,
+	chrootOps ops.Ops,
+	ostreeClient ostreeclient.IClient,
+	rpmOstreeClient rpmostreeclient.IClient,
+) IPConfigStageHandler {
+	return &IPConfigIdleStageHandler{
+		Client:          client,
+		NoncachedClient: noncachedClient,
+		ChrootOps:       chrootOps,
+		OstreeClient:    ostreeClient,
+		RPMOstreeClient: rpmOstreeClient,
+	}
+}
+
+func (h *IPConfigIdleStageHandler) Handle(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+) (res ctrl.Result, err error) {
 	logger := log.FromContext(ctx).WithName("IPConfigIdle")
 	logger.Info("Starting handleIdle")
 
@@ -27,7 +56,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	if idleCond != nil && idleCond.Status == metav1.ConditionFalse &&
 		(idleCond.Reason == string(controllerutils.ConditionReasons.FinalizeFailed) ||
 			idleCond.Reason == string(controllerutils.ConditionReasons.AbortFailed)) {
-		if done, cerr := r.checkIPManualCleanup(ctx, ipc); cerr != nil {
+		if done, cerr := h.checkIPManualCleanup(ctx, ipc); cerr != nil {
 			return requeueWithShortInterval(), cerr
 		} else if done {
 			logger.Info("Manual cleanup annotation is found, removed annotation and retrying idle tasks")
@@ -35,13 +64,13 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	}
 
 	if isIPTransitionRequested(ipc) && ipc.Status.ValidNextStages != nil {
-		if err := r.validateIPConfigStage(ipc); err != nil {
+		if err := validateIPConfigStage(ipc); err != nil {
 			controllerutils.SetIPIdleStatusFalse(
 				ipc,
 				controllerutils.ConditionReasons.InvalidTransition,
 				fmt.Sprintf("invalid IPConfig stage: %s", ipc.Spec.Stage),
 			)
-			if err := r.Client.Status().Update(ctx, ipc); err != nil {
+			if err := h.Client.Status().Update(ctx, ipc); err != nil {
 				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 			}
 			return doNotRequeue(), nil
@@ -49,17 +78,17 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	}
 
 	logger.Info("Running health checks")
-	if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
+	if err := CheckHealth(ctx, h.NoncachedClient, logger); err != nil {
 		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
 		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
+		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			return res, ierr
 		}
 		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 	}
 
-	if err := r.cleanup(logger); err != nil {
+	if err := h.cleanup(logger); err != nil {
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
 			controllerutils.ConditionReasons.FinalizeFailed,
@@ -68,20 +97,20 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 				controllerutils.ManualCleanupAnnotation,
 			),
 		)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
+		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
 		return requeueWithError(fmt.Errorf("failed to cleanup: %w", err))
 	}
 
 	lcaHostCopy := common.PathOutsideChroot(controllerutils.LcaCliBinaryHostPath)
-	if err := os.Remove(lcaHostCopy); err != nil && !os.IsNotExist(err) {
+	if err := h.ChrootOps.RemoveFile(lcaHostCopy); err != nil && !h.ChrootOps.IsNotExist(err) {
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
 			controllerutils.ConditionReasons.FinalizeFailed,
 			fmt.Sprintf("failed to remove temporary lca-cli host copy: %v.", err),
 		)
-		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
+		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
 
@@ -89,7 +118,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	}
 
 	controllerutils.ResetStatusConditions(&ipc.Status.Conditions, ipc.Generation)
-	if err := r.Client.Status().Update(ctx, ipc); err != nil {
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
@@ -98,27 +127,31 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 	return doNotRequeue(), nil
 }
 
-func (r *IPConfigReconciler) cleanup(logger logr.Logger) error {
-	if err := r.ChrootOps.RemountSysroot(); err != nil {
+func (h *IPConfigIdleStageHandler) cleanup(logger logr.Logger) error {
+	if err := h.ChrootOps.RemountSysroot(); err != nil {
 		return fmt.Errorf("failed to remount sysroot: %w", err)
 	}
 
-	if err := r.cleanuoUnbootedStateroots(logger); err != nil {
+	if err := h.cleanuoUnbootedStateroots(logger); err != nil {
 		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
 	}
 
-	if err := cleanupIPConfigFiles(); err != nil {
+	if err := cleanupIPConfigFiles(h.ChrootOps); err != nil {
 		return fmt.Errorf("failed to cleanup workspace: %w", err)
 	}
 
 	return nil
 }
 
-func cleanupIPConfigFiles() error {
-	if _, err := os.Stat(common.PathOutsideChroot(controllerutils.IPConfigWorkspacePath)); err != nil {
+func cleanupIPConfigFiles(chrootOps ops.Ops) error {
+	if _, err := chrootOps.StatFile(
+		common.PathOutsideChroot(controllerutils.IPConfigWorkspacePath),
+	); err != nil {
 		return nil
 	}
-	if err := os.RemoveAll(common.PathOutsideChroot(controllerutils.IPConfigWorkspacePath)); err != nil {
+	if err := chrootOps.RemoveAllFiles(
+		common.PathOutsideChroot(controllerutils.IPConfigWorkspacePath),
+	); err != nil {
 		return fmt.Errorf("removing %s failed: %w", controllerutils.IPConfigWorkspacePath, err)
 	}
 	return nil
@@ -126,10 +159,13 @@ func cleanupIPConfigFiles() error {
 
 // checkIPManualCleanup looks for ManualCleanupAnnotation on the IPConfig CR. If present, it removes
 // the annotation and returns true so the reconcile loop can retry idle tasks.
-func (r *IPConfigReconciler) checkIPManualCleanup(ctx context.Context, ipc *ipcv1.IPConfig) (bool, error) {
+func (h *IPConfigIdleStageHandler) checkIPManualCleanup(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+) (bool, error) {
 	if _, ok := ipc.Annotations[controllerutils.ManualCleanupAnnotation]; ok {
 		delete(ipc.Annotations, controllerutils.ManualCleanupAnnotation)
-		if err := r.Client.Update(ctx, ipc); err != nil {
+		if err := h.Client.Update(ctx, ipc); err != nil {
 			return false, fmt.Errorf("failed to remove manual cleanup annotation from IPConfig: %w", err)
 		}
 		return true, nil
@@ -137,22 +173,22 @@ func (r *IPConfigReconciler) checkIPManualCleanup(ctx context.Context, ipc *ipcv
 	return false, nil
 }
 
-func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error {
-	staterootsToRemove, err := getStaterootsToRemove(r.RPMOstreeClient)
+func (h *IPConfigIdleStageHandler) cleanuoUnbootedStateroots(logger logr.Logger) error {
+	staterootsToRemove, err := getStaterootsToRemove(h.RPMOstreeClient)
 	if err != nil {
 		return fmt.Errorf("failed to determine stateroots to remove: %w", err)
 	}
 	logger.Info("Stateroots to remove", "stateroots", staterootsToRemove)
 
-	if err := r.ChrootOps.RemountBoot(); err != nil {
+	if err := h.ChrootOps.RemountBoot(); err != nil {
 		return fmt.Errorf("failed to remount boot: %w", err)
 	}
 
-	if err := removeBootDirsByStaterootPrefixes(logger, staterootsToRemove); err != nil {
+	if err := removeBootDirsByStaterootPrefixes(logger, h.ChrootOps, staterootsToRemove); err != nil {
 		return err
 	}
 
-	if err := CleanupUnbootedStateroots(logger, r.ChrootOps, r.OstreeClient, r.RPMOstreeClient); err != nil {
+	if err := CleanupUnbootedStateroots(logger, h.ChrootOps, h.OstreeClient, h.RPMOstreeClient); err != nil {
 		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
 	}
 
@@ -161,11 +197,15 @@ func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error
 
 // removeBootDirsByStaterootPrefixes removes directories under /boot/ostree that
 // start with any of the given stateroot names followed by a hyphen.
-func removeBootDirsByStaterootPrefixes(logger logr.Logger, staterootsToRemove []string) error {
+func removeBootDirsByStaterootPrefixes(
+	logger logr.Logger,
+	chrootOps ops.Ops,
+	staterootsToRemove []string,
+) error {
 	bootOstreePath := common.PathOutsideChroot("/boot/ostree")
-	entries, err := os.ReadDir(bootOstreePath)
+	entries, err := chrootOps.ReadDir(bootOstreePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if chrootOps.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("failed to list boot ostree directory %s: %w", bootOstreePath, err)
@@ -183,7 +223,7 @@ func removeBootDirsByStaterootPrefixes(logger logr.Logger, staterootsToRemove []
 			}
 			dirPath := filepath.Join(bootOstreePath, name)
 			logger.Info("Removing orphaned boot directory", "path", dirPath)
-			if err := os.RemoveAll(dirPath); err != nil {
+			if err := chrootOps.RemoveAllFiles(dirPath); err != nil {
 				return fmt.Errorf("failed to remove boot directory %s: %w", dirPath, err)
 			}
 		}

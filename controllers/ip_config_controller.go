@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	syaml "sigs.k8s.io/yaml"
 
+	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
@@ -45,17 +46,28 @@ type IPConfigReconciler struct {
 	client.Client
 	NoncachedClient client.Reader
 	Scheme          *runtime.Scheme
-	Executor        ops.Execute
 	ChrootOps       ops.Ops
 	NsenterOps      ops.Ops
 	RebootClient    reboot.RebootIntf
 	RPMOstreeClient rpmostreeclient.IClient
 	OstreeClient    ostreeclient.IClient
 	Clientset       *kubernetes.Clientset
-	PrepHandler     IPConfigPrepHandlerInterface
-	ConfigHandler   IPConfigConfigurationHandlerInterface
-	RollbackHandler IPConfigRollbackHandlerInterface
+	IdleHandler     IPConfigStageHandler
+	PrepHandler     IPConfigStageHandler
+	ConfigHandler   IPConfigStageHandler
+	RollbackHandler IPConfigStageHandler
 	Mux             *sync.Mutex
+}
+
+//go:generate mockgen -source=ip_config_controller.go -package=controllers -destination=ip_config_controller_mock.go
+
+type IPConfigStageHandler interface {
+	Handle(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error)
+}
+
+type IPConfigTwoPhaseStageHandler interface {
+	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
+	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 }
 
 func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
@@ -122,13 +134,13 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 
 	switch ipc.Spec.Stage {
 	case ipcv1.IPStages.Idle:
-		return r.handleIdle(ctx, ipc)
+		return r.IdleHandler.Handle(ctx, ipc)
 	case ipcv1.IPStages.Prep:
-		return r.handlePrep(ctx, ipc)
+		return r.PrepHandler.Handle(ctx, ipc)
 	case ipcv1.IPStages.Config:
-		return r.handleConfig(ctx, ipc)
+		return r.ConfigHandler.Handle(ctx, ipc)
 	case ipcv1.IPStages.Rollback:
-		return r.handleRollback(ctx, ipc)
+		return r.RollbackHandler.Handle(ctx, ipc)
 	default:
 		// Shouldn't happen
 		logger.Error(nil, "invalid IPConfig stage", "stage", ipc.Spec.Stage)
@@ -272,7 +284,7 @@ func (r *IPConfigReconciler) getOrCreateIPConfig(ctx context.Context) (*ipcv1.IP
 	return ipc, nil
 }
 
-func (r *IPConfigReconciler) validateIPConfigStage(ipc *ipcv1.IPConfig) error {
+func validateIPConfigStage(ipc *ipcv1.IPConfig) error {
 	if !lo.Contains(ipc.Status.ValidNextStages, ipc.Spec.Stage) {
 		return fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage)
 	}

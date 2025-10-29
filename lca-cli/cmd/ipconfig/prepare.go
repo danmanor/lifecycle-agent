@@ -41,15 +41,15 @@ import (
 )
 
 var (
-	ipRollbackScheme = runtime.NewScheme()
+	ipPrepareScheme = runtime.NewScheme()
 
 	newIPv4 string
 	newIPv6 string
 )
 
 func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(ipRollbackScheme))
-	utilruntime.Must(mcfgv1.AddToScheme(ipRollbackScheme))
+	utilruntime.Must(clientgoscheme.AddToScheme(ipPrepareScheme))
+	utilruntime.Must(mcfgv1.AddToScheme(ipPrepareScheme))
 
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv4, "ipv4-address", "", "New IPv4 address")
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv6, "ipv6-address", "", "New IPv6 address")
@@ -82,7 +82,7 @@ func runIPConfigPrepare() error {
 	if err != nil {
 		return fmt.Errorf("failed to create k8s config: %w", err)
 	}
-	client, err := runtimeClient.New(k8sConfig, runtimeClient.Options{Scheme: ipRollbackScheme})
+	client, err := runtimeClient.New(k8sConfig, runtimeClient.Options{Scheme: ipPrepareScheme})
 	if err != nil {
 		return fmt.Errorf("failed to create runtime client: %w", err)
 	}

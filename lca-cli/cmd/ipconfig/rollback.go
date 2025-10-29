@@ -89,13 +89,8 @@ func runIPConfigRollback() error {
 		return err
 	}
 
-	newStaterootName, err := ipconfig.BuildStaterootName(newIPv4, newIPv6)
-	if err != nil {
-		return fmt.Errorf("failed to build stateroot name: %w", err)
-	}
-
 	common.OstreeDeployPathPrefix = "/sysroot"
-	staterootPath := common.GetStaterootPath(newStaterootName)
+	staterootPath := common.GetStaterootPath(rollbackStateroot)
 	statusFilePath := filepath.Join(staterootPath, common.IPConfigRollbackStatusFile)
 
 	if err := opsInterface.RemountSysroot(); err != nil {

@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// FileOpsReader defines minimal file operations needed to read status
+type FileOpsReader interface {
+	ReadFile(string) ([]byte, error)
+	IsNotExist(error) bool
+}
+
 // WriteIPConfigStatus writes the given status struct to the provided file path.
 func WriteIPConfigStatus(filePath string, st IPConfigRunStatus) error {
 	dir := filepath.Dir(filePath)
@@ -38,10 +44,10 @@ func FinalizeIPConfigStatus(filePath string, phase IPConfigRunStatusPhase, msg s
 
 // ReadIPConfigStatus reads and parses the status file, returning phase and message.
 // Returns Unknown when the file is not found.
-func ReadIPConfigStatus(filePath string) (IPConfigRunStatusPhase, string, error) {
-	data, err := os.ReadFile(filePath)
+func ReadIPConfigStatus(filePath string, fops FileOpsReader) (IPConfigRunStatusPhase, string, error) {
+	data, err := fops.ReadFile(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if fops.IsNotExist(err) {
 			return IPConfigRunPhaseUnknown, "", nil
 		}
 		return IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)

@@ -41,6 +41,13 @@ type Ops interface {
 	RunInHostNamespace(command string, args ...string) (string, error)
 	RunBashInHostNamespace(command string, args ...string) (string, error)
 	RunListOfCommands(cmds []*CMD) error
+	ReadFile(filename string) ([]byte, error)
+	WriteFile(filename string, data []byte, perm os.FileMode) error
+	RemoveFile(path string) error
+	RemoveAllFiles(path string) error
+	ReadDir(path string) ([]os.DirEntry, error)
+	StatFile(name string) (os.FileInfo, error)
+	IsNotExist(err error) bool
 	ForceExpireSeedCrypto(recertContainerImage, authFile string, hasKubeAdminPassword bool) error
 	RestoreOriginalSeedCrypto(recertContainerImage, authFile string) error
 	RunUnauthenticatedEtcdServer(authFile, name string) error
@@ -68,7 +75,6 @@ type Ops interface {
 	StopClusterServices() error
 	EnableClusterServices(root string) error
 	EnsureNMStateConfigurationServiceEnabled() error
-	Reboot() error
 }
 
 type CMD struct {
@@ -522,6 +528,55 @@ func (o *ops) RunListOfCommands(cmds []*CMD) error {
 	return nil
 }
 
+func (o *ops) ReadFile(filename string) ([]byte, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file %s: %w", filename, err)
+	}
+	return data, nil
+}
+
+func (o *ops) WriteFile(filename string, data []byte, perm os.FileMode) error {
+	if err := os.WriteFile(filename, data, perm); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filename, err)
+	}
+	return nil
+}
+
+func (o *ops) RemoveFile(path string) error {
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to remove %s: %w", path, err)
+	}
+	return nil
+}
+
+func (o *ops) RemoveAllFiles(path string) error {
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("failed to remove all at %s: %w", path, err)
+	}
+	return nil
+}
+
+func (o *ops) ReadDir(path string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read directory %s: %w", path, err)
+	}
+	return entries, nil
+}
+
+func (o *ops) StatFile(name string) (os.FileInfo, error) {
+	info, err := os.Stat(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat %s: %w", name, err)
+	}
+	return info, nil
+}
+
+func (o *ops) IsNotExist(err error) bool {
+	return os.IsNotExist(err)
+}
+
 func (o *ops) CreateExtraPartition(installationDisk, extraPartitionLabel, extraPartitionStart string, extraPartitionNumber uint) error {
 	o.log.Info("Creating extra partition")
 	if _, err := o.RunBashInHostNamespace(
@@ -700,15 +755,6 @@ func (o *ops) EnsureNMStateConfigurationServiceEnabled() error {
 	_, err := o.SystemctlAction("enable", "nmstate-configuration.service")
 	if err != nil {
 		return fmt.Errorf("failed to enable nmstate-configuration: %w", err)
-	}
-	return nil
-}
-
-func (o *ops) Reboot() error {
-	o.log.Info("Rebooting the system")
-	_, err := o.SystemctlAction("reboot")
-	if err != nil {
-		return fmt.Errorf("failed to reboot: %w", err)
 	}
 	return nil
 }
