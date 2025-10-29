@@ -48,19 +48,15 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		}
 	}
 
-	finalizeRequested, _ := r.computeIdleIntent(ipc)
-
-	if finalizeRequested {
-		logger.Info("Idle requested for finalize; running health checks")
-		if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
-			msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
-			controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
-			if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
-				res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-				return res, ierr
-			}
-			return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
+	logger.Info("Running health checks")
+	if err := CheckHealth(ctx, r.NoncachedClient, logger); err != nil {
+		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
+		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
+		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
+			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+			return res, ierr
 		}
+		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 	}
 
 	if err := r.cleanup(logger); err != nil {
@@ -78,7 +74,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 		return requeueWithError(fmt.Errorf("failed to cleanup: %w", err))
 	}
 
-	lcaHostCopy := common.PathOutsideChroot("/var/usrlocal/bin/lca-cli")
+	lcaHostCopy := common.PathOutsideChroot(controllerutils.LcaCliBinaryHostPath)
 	if err := os.Remove(lcaHostCopy); err != nil && !os.IsNotExist(err) {
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
@@ -103,7 +99,7 @@ func (r *IPConfigReconciler) handleIdle(ctx context.Context, ipc *ipcv1.IPConfig
 }
 
 func (r *IPConfigReconciler) cleanup(logger logr.Logger) error {
-	if err := r.Ops.RemountSysroot(); err != nil {
+	if err := r.ChrootOps.RemountSysroot(); err != nil {
 		return fmt.Errorf("failed to remount sysroot: %w", err)
 	}
 
@@ -116,21 +112,6 @@ func (r *IPConfigReconciler) cleanup(logger logr.Logger) error {
 	}
 
 	return nil
-}
-
-// computeIdleIntent figures out whether we should finalize (post-pivot or configure completed)
-// and whether an abort was requested (prepare/configure in-progress without finalize).
-func (r *IPConfigReconciler) computeIdleIntent(ipc *ipcv1.IPConfig) (bool, bool) {
-	isAfterPivot := isTargetStaterootBooted(ipc, r.RPMOstreeClient)
-	prepCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Prep)
-	confCond := controllerutils.GetIPInProgressCondition(ipc, ipcv1.IPStages.Config)
-
-	finalizeRequested := isAfterPivot ||
-		(confCond != nil &&
-			confCond.Status == metav1.ConditionTrue &&
-			confCond.Reason == string(controllerutils.ConditionReasons.Completed))
-	abortRequested := !finalizeRequested && (prepCond != nil || confCond != nil)
-	return finalizeRequested, abortRequested
 }
 
 func cleanupIPConfigFiles() error {
@@ -163,7 +144,7 @@ func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error
 	}
 	logger.Info("Stateroots to remove", "stateroots", staterootsToRemove)
 
-	if err := r.Ops.RemountBoot(); err != nil {
+	if err := r.ChrootOps.RemountBoot(); err != nil {
 		return fmt.Errorf("failed to remount boot: %w", err)
 	}
 
@@ -171,7 +152,7 @@ func (r *IPConfigReconciler) cleanuoUnbootedStateroots(logger logr.Logger) error
 		return err
 	}
 
-	if err := CleanupUnbootedStateroots(logger, r.Ops, r.OstreeClient, r.RPMOstreeClient); err != nil {
+	if err := CleanupUnbootedStateroots(logger, r.ChrootOps, r.OstreeClient, r.RPMOstreeClient); err != nil {
 		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
 	}
 

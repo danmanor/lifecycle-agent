@@ -112,7 +112,7 @@ func runIPConfigPrepare() error {
 		return err
 	}
 
-	newStaterootName, err := preparer.BuildStaterootName(newIPv4, newIPv6)
+	newStaterootName, err := ipconfig.BuildStaterootName(newIPv4, newIPv6)
 	if err != nil {
 		return fmt.Errorf("failed to build stateroot name: %w", err)
 	}

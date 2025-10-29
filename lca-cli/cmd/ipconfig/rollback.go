@@ -19,6 +19,7 @@ package ipconfigcmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -77,15 +78,32 @@ func runIPConfigRollback() error {
 
 	exec := ipconfig.NewRollbackHandler(pkgLog, opsInterface, ostreeClient, rpmClient)
 	if err := exec.RunRollback(rollbackStateroot); err != nil {
-		internalErr := common.FinalizeIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunPhaseFailed, fmt.Sprintf("ip-config rollback failed: %v", err))
+		internalErr := common.FinalizeIPConfigStatus(
+			common.IPConfigRollbackStatusFile,
+			common.IPConfigRunPhaseFailed,
+			fmt.Sprintf("ip-config rollback failed: %v", err),
+		)
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config rollback status: %w", internalErr)
 		}
 		return err
 	}
 
+	newStaterootName, err := ipconfig.BuildStaterootName(newIPv4, newIPv6)
+	if err != nil {
+		return fmt.Errorf("failed to build stateroot name: %w", err)
+	}
+
+	common.OstreeDeployPathPrefix = "/sysroot"
+	staterootPath := common.GetStaterootPath(newStaterootName)
+	statusFilePath := filepath.Join(staterootPath, common.IPConfigRollbackStatusFile)
+
+	if err := opsInterface.RemountSysroot(); err != nil {
+		return fmt.Errorf("failed to remount /sysroot rw: %w", err)
+	}
+
 	if err := common.FinalizeIPConfigStatus(
-		common.IPConfigRollbackStatusFile,
+		statusFilePath,
 		common.IPConfigRunPhaseSucceeded,
 		"ip-config rollback completed successfully",
 	); err != nil {

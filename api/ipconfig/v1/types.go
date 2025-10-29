@@ -29,13 +29,13 @@ import (
 // +kubebuilder:printcolumn:name="Desired Stage",type="string",JSONPath=".spec.stage"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.conditions[-1:].reason"
 // +kubebuilder:printcolumn:name="Details",type="string",JSONPath=".status.conditions[-1:].message"
-// +kubebuilder:printcolumn:name="Desired IPv4",type="string",JSONPath=".spec.ipv4.address"
-// +kubebuilder:printcolumn:name="Current IPv4",type="string",JSONPath=".status.clusterIPs.nodeInternalIPs[?(@.family=='IPv4')].address"
-// +kubebuilder:printcolumn:name="Desired IPv6",type="string",JSONPath=".spec.ipv6.address"
-// +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.clusterIPs.nodeInternalIPs[?(@.family=='IPv6')].address"
+// +kubebuilder:printcolumn:name="Current IPv4",type="string",JSONPath=".status.clusterNetwork.ipv4.address",priority=1
+// +kubebuilder:printcolumn:name="Desired IPv4",type="string",JSONPath=".spec.ipv4.address",priority=1
+// +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.clusterNetwork.ipv6.address",priority=1
+// +kubebuilder:printcolumn:name="Desired IPv6",type="string",JSONPath=".spec.ipv6.address",priority=1
 // +kubebuilder:validation:XValidation:message="ipconfig is a singleton, metadata.name must be 'ipconfig'", rule="self.metadata.name == 'ipconfig'"
-// +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || self.spec.stage=='Idle' || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
-// +kubebuilder:validation:XValidation:message="can not change spec.ipv6 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || self.spec.stage=='Idle' || has(oldSelf.spec.ipv6) && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv6 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)"
 
 // IPConfig is the Schema for controlling node IP configuration lifecycle via lca-cli ip-config.
 type IPConfig struct {
@@ -164,9 +164,13 @@ type IPConfigStatus struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Valid Next Stage"
 	ValidNextStages []IPConfigStage `json:"validNextStages,omitempty"`
 
-	// ClusterIPs reflects the node internal IPs known to the cluster
-	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Cluster IPs"
-	ClusterIPs *ClusterIPsStatus `json:"clusterIPs,omitempty"`
+	// HostNetwork reflects the actual network configuration on the host (br-ex)
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Host Network"
+	HostNetwork *HostNetworkStatus `json:"hostNetwork,omitempty"`
+
+	// ClusterNetwork reflects the node's IPs and their subnets as seen on the cluster network
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Cluster Network"
+	ClusterNetwork *ClusterNetworkStatus `json:"clusterNetwork,omitempty"`
 
 	// History stores timing info of different IPConfig stages and their important phases
 	// +optional
@@ -175,20 +179,24 @@ type IPConfigStatus struct {
 
 // HostNetworkStatus summarizes current host network
 type HostNetworkStatus struct {
-	VLAN *VLANConfig     `json:"vlan,omitempty"`
 	IPv4 *IPFamilyConfig `json:"ipv4,omitempty"`
 	IPv6 *IPFamilyConfig `json:"ipv6,omitempty"`
 }
 
-// ClusterIPsStatus contains node internal IPs
-type ClusterIPsStatus struct {
-	NodeInternalIPs []FamilyIP `json:"nodeInternalIPs,omitempty"`
+// ClusterNetworkStatus summarizes cluster network using lists of strings
+type ClusterNetworkStatus struct {
+	// IPv4 summarizes the current IPv4 on the cluster network
+	IPv4 *ClusterIPStatus `json:"ipv4,omitempty"`
+	// IPv6 summarizes the current IPv6 on the cluster network
+	IPv6 *ClusterIPStatus `json:"ipv6,omitempty"`
 }
 
-// FamilyIP pairs IP family and address
-type FamilyIP struct {
-	Family  string `json:"family"`
-	Address string `json:"address"`
+// ClusterIPStatus represents a single IP family view on the cluster network
+type ClusterIPStatus struct {
+	// Address is the node internal IP (plain address, no prefix)
+	Address string `json:"address,omitempty"`
+	// MachineNetwork is the matching machine network CIDR for the IP
+	MachineNetwork string `json:"machineNetwork,omitempty"`
 }
 
 // IPHistory mirrors IBU history for IPConfig stages

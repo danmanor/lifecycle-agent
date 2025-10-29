@@ -71,15 +71,6 @@ func (r *IPConfigReconciler) handlePrep(ctx context.Context, ipc *ipcv1.IPConfig
 		return doNotRequeue(), nil
 	}
 
-	controllerutils.SetIPIdleStatusFalse(
-		ipc,
-		controllerutils.ConditionReasons.InProgress,
-		"IP configuration is in progress",
-	)
-	if err := r.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-
 	if err := statusIPsMatchSpec(ipc); err == nil {
 		controllerutils.SetIPPrepStatusCompleted(ipc, "Desired IP equals current IP")
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
@@ -159,9 +150,18 @@ func (p *IPConfigPrepHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPConfig,
 }
 
 func (p *IPConfigReconciler) handlePrepareUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
+	controllerutils.SetIPIdleStatusFalse(
+		ipc,
+		controllerutils.ConditionReasons.FinalizeFailed,
+		"IP Configuration is in progress",
+	)
+	if err := p.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	controllerutils.SetIPPrepStatusInProgress(
 		ipc,
-		"IP configuration preparation is in progress",
+		"Preparation is in progress",
 	)
 	if err := p.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -278,10 +278,10 @@ func (p *IPConfigPrepHandler) startIPConfigInitMonitor(ipc *ipcv1.IPConfig, logg
 	}
 
 	monitorArgs := []string{
-		"--property", "ExitType=cgroup",
+		"--property", controllerutils.SystemdExitTypeCgroup,
 		"--unit", common.IPCInitMonitorUnit,
-		"--description", "lifecycle-agent: ip-config init monitor",
-		"lca-cli", "init-monitor", "--monitor", "--mode", "ipconfig",
+		"--description", controllerutils.IPConfigInitMonitorDescription,
+		controllerutils.LcaCliBinaryName, "init-monitor", "--monitor", "--mode", "ipconfig",
 	}
 
 	if _, err := p.Executor.Execute("systemd-run", monitorArgs...); err != nil {
@@ -415,10 +415,10 @@ func (p *IPConfigPrepHandler) RunLcaCliIPConfigPrepare(
 	logger.Info("Scheduling lca-cli ip-config prepare via systemd-run")
 
 	args := []string{
-		"--property", "ExitType=cgroup",
-		"--unit", "lca-ipconfig-prepare",
-		"--description", "lifecycle-agent: ip-config prepare",
-		"lca-cli", "ip-config", "prepare",
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", controllerutils.IPConfigPrepareUnit,
+		"--description", controllerutils.IPConfigPrepareDescription,
+		controllerutils.LcaCliBinaryName, "ip-config", "prepare",
 	}
 
 	if ipv4Addr != "" {

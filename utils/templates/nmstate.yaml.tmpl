@@ -46,11 +46,15 @@ routes:
   - destination: 0.0.0.0/0
     next-hop-interface: br-ex
     next-hop-address: {{ .IPv4.Gateway }}
+    metric: 100
+    table-id: 254
   {{- end }}
   {{- if .IPv6.Gateway }}
   - destination: ::/0
     next-hop-interface: br-ex
     next-hop-address: {{ .IPv6.Gateway }}
+    metric: 1024
+    table-id: 254
   {{- end }}
 dns-resolver:
   config:

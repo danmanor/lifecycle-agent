@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -105,14 +107,7 @@ func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	if err := refreshCurrentIPs(ctx, ipc, c.NoncachedClient); err != nil {
-		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to refresh current IPs: %s", err.Error()))
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
-
-		return requeueWithError(fmt.Errorf("failed to refresh current IPs: %w", err))
-	}
+	// rely on controller reconcile to refresh host/cluster network statuses continuously
 
 	if err := statusIPsMatchSpec(ipc); err != nil {
 		controllerutils.SetIPConfigStatusInProgress(ipc, fmt.Sprintf("Waiting for current IPs to match spec: %s", err.Error()))
@@ -132,60 +127,170 @@ func (c *IPConfigConfigurationHandler) PostPivot(ctx context.Context, ipc *ipcv1
 	return doNotRequeue(), nil
 }
 
-// statusIPsMatchSpec checks whether the IPs requested in spec are present in status.ClusterIPs.
-// It returns true when all requested families (IPv4/IPv6) are observed with exact addresses.
+// statusIPsMatchSpec validates that all provided network config in spec matches
+// the observed status in hostNetwork and clusterNetwork.
 func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
-	desiredV4 := ""
-	desiredV6 := ""
+	mismatches := []string{}
 
-	if v := ipc.Spec.IPv4; v != nil && v.Address != "" {
-		desiredV4 = strings.Split(v.Address, "/")[0]
-	}
-
-	if v := ipc.Spec.IPv6; v != nil && v.Address != "" {
-		addr := strings.Split(v.Address, "/")[0]
-		desiredV6 = strings.Trim(addr, "[]")
-	}
-
-	// Nothing requested, trivially matches
-	if desiredV4 == "" && desiredV6 == "" {
+	if ipc.Spec.IPv4 == nil && ipc.Spec.IPv6 == nil {
 		return fmt.Errorf("nothing requested, shouldn't happen")
 	}
 
-	if ipc.Status.ClusterIPs == nil {
-		return fmt.Errorf("clusterIPs not yet populated")
+	if ipc.Status.HostNetwork == nil || ipc.Status.ClusterNetwork == nil {
+		return fmt.Errorf("host/cluster network not yet populated")
 	}
 
-	foundV4 := desiredV4 == ""
-	foundV6 := desiredV6 == ""
-
-	for _, famIP := range ipc.Status.ClusterIPs.NodeInternalIPs {
-		if desiredV4 != "" && famIP.Family == "IPv4" && famIP.Address == desiredV4 {
-			foundV4 = true
+	// Validate IPv4 if requested
+	if v4 := ipc.Spec.IPv4; v4 != nil {
+		if ipc.Status.HostNetwork.IPv4 == nil {
+			mismatches = append(mismatches, "hostNetwork.ipv4 missing")
+		} else {
+			if err := compareAddressWithPrefix(
+				controllerutils.IPv4FamilyName,
+				v4.Address,
+				ipc.Status.HostNetwork.IPv4.Address,
+			); err != nil {
+				mismatches = append(mismatches, err.Error())
+			}
+			if !cidrEqual(v4.MachineNetwork, ipc.Status.HostNetwork.IPv4.MachineNetwork) {
+				mismatches = append(mismatches, fmt.Sprintf("ipv4 machineNetwork mismatch: spec=%s status=%s", v4.MachineNetwork, ipc.Status.HostNetwork.IPv4.MachineNetwork))
+			}
+			if v4.Gateway != "" && v4.Gateway != ipc.Status.HostNetwork.IPv4.Gateway {
+				mismatches = append(mismatches, fmt.Sprintf("ipv4 gateway mismatch: spec=%s status=%s", v4.Gateway, ipc.Status.HostNetwork.IPv4.Gateway))
+			}
+			if v4.DNSServer != "" && v4.DNSServer != ipc.Status.HostNetwork.IPv4.DNSServer {
+				mismatches = append(mismatches, fmt.Sprintf("ipv4 dns mismatch: spec=%s status=%s", v4.DNSServer, ipc.Status.HostNetwork.IPv4.DNSServer))
+			}
 		}
-		if desiredV6 != "" && famIP.Family == "IPv6" && famIP.Address == desiredV6 {
-			foundV6 = true
+
+		wantIP, _, err := splitAddr(v4.Address)
+		if err != nil {
+			mismatches = append(mismatches, fmt.Sprintf("ipv4 spec address invalid: %v", err))
+		} else {
+			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv4 == nil || ipc.Status.ClusterNetwork.IPv4.Address == "" {
+				mismatches = append(mismatches, "cluster ipv4 not observed: ipv4 address missing")
+			} else if !ipEqual(wantIP, ipc.Status.ClusterNetwork.IPv4.Address) {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 not observed: want %s got %s", wantIP, ipc.Status.ClusterNetwork.IPv4.Address))
+			}
+		}
+
+		if v4.MachineNetwork != "" {
+			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv4 == nil || ipc.Status.ClusterNetwork.IPv4.MachineNetwork == "" {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s", v4.MachineNetwork))
+			} else if !cidrEqual(v4.MachineNetwork, ipc.Status.ClusterNetwork.IPv4.MachineNetwork) {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s got %s", v4.MachineNetwork, ipc.Status.ClusterNetwork.IPv4.MachineNetwork))
+			}
 		}
 	}
 
-	if foundV4 && foundV6 {
-		return nil
+	// Validate IPv6 if requested
+	if v6 := ipc.Spec.IPv6; v6 != nil {
+		if ipc.Status.HostNetwork.IPv6 == nil {
+			mismatches = append(mismatches, "hostNetwork.ipv6 missing")
+		} else {
+			if err := compareAddressWithPrefix(
+				controllerutils.IPv6FamilyName,
+				v6.Address,
+				ipc.Status.HostNetwork.IPv6.Address,
+			); err != nil {
+				mismatches = append(mismatches, err.Error())
+			}
+			if !cidrEqual(v6.MachineNetwork, ipc.Status.HostNetwork.IPv6.MachineNetwork) {
+				mismatches = append(mismatches, fmt.Sprintf("ipv6 machineNetwork mismatch: spec=%s status=%s", v6.MachineNetwork, ipc.Status.HostNetwork.IPv6.MachineNetwork))
+			}
+			if v6.Gateway != "" && v6.Gateway != ipc.Status.HostNetwork.IPv6.Gateway {
+				mismatches = append(mismatches, fmt.Sprintf("ipv6 gateway mismatch: spec=%s status=%s", v6.Gateway, ipc.Status.HostNetwork.IPv6.Gateway))
+			}
+			if v6.DNSServer != "" && v6.DNSServer != ipc.Status.HostNetwork.IPv6.DNSServer {
+				mismatches = append(mismatches, fmt.Sprintf("ipv6 dns mismatch: spec=%s status=%s", v6.DNSServer, ipc.Status.HostNetwork.IPv6.DNSServer))
+			}
+		}
+
+		wantIP, _, err := splitAddr(v6.Address)
+		if err != nil {
+			mismatches = append(mismatches, fmt.Sprintf("ipv6 spec address invalid: %v", err))
+		} else {
+			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv6 == nil || ipc.Status.ClusterNetwork.IPv6.Address == "" {
+				mismatches = append(mismatches, "cluster ipv6 not observed: ipv6 address missing")
+			} else if !ipEqual(wantIP, ipc.Status.ClusterNetwork.IPv6.Address) {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 not observed: want %s got %s", wantIP, ipc.Status.ClusterNetwork.IPv6.Address))
+			}
+		}
+		// Machine network must be present and match exactly
+		if v6.MachineNetwork != "" {
+			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv6 == nil || ipc.Status.ClusterNetwork.IPv6.MachineNetwork == "" {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s", v6.MachineNetwork))
+			} else if !cidrEqual(v6.MachineNetwork, ipc.Status.ClusterNetwork.IPv6.MachineNetwork) {
+				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s got %s", v6.MachineNetwork, ipc.Status.ClusterNetwork.IPv6.MachineNetwork))
+			}
+		}
 	}
 
-	missing := []string{}
-	if !foundV4 {
-		missing = append(missing, fmt.Sprintf("IPv4 %s", desiredV4))
-	}
-	if !foundV6 {
-		missing = append(missing, fmt.Sprintf("IPv6 %s", desiredV6))
+	if len(mismatches) > 0 {
+		return fmt.Errorf("desired network not observed in status: %s", strings.Join(mismatches, ", "))
 	}
 
-	return fmt.Errorf("desired IPs not observed in status: %s", strings.Join(missing, ", "))
+	return nil
+}
+
+func compareAddressWithPrefix(family, specAddr, statusAddr string) error {
+	sSpecIP, sSpecPref, err := splitAddr(specAddr)
+	if err != nil {
+		return fmt.Errorf("%s spec address invalid: %v", family, err)
+	}
+	sStatIP, sStatPref, err := splitAddr(statusAddr)
+	if err != nil {
+		return fmt.Errorf("%s status address invalid: %v", family, err)
+	}
+	if !ipEqual(sSpecIP, sStatIP) || sSpecPref != sStatPref {
+		return fmt.Errorf("%s address mismatch: spec=%s/%d status=%s/%d", family, sSpecIP, sSpecPref, sStatIP, sStatPref)
+	}
+	return nil
+}
+
+func splitAddr(addr string) (string, int, error) {
+	addr = strings.Trim(addr, "[]")
+	ip, pref, ok := strings.Cut(addr, "/")
+	if !ok {
+		return "", 0, fmt.Errorf("missing prefix")
+	}
+	pi := net.ParseIP(ip)
+	if pi == nil {
+		return "", 0, fmt.Errorf("invalid ip")
+	}
+	n, err := strconv.Atoi(pref)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid prefix")
+	}
+	return pi.String(), n, nil
+}
+
+func ipEqual(a, b string) bool {
+	return net.ParseIP(a).Equal(net.ParseIP(b))
+}
+
+func cidrEqual(a, b string) bool {
+	na, ap, ea := parseCIDR(a)
+	nb, bp, eb := parseCIDR(b)
+	if ea != nil || eb != nil {
+		return a == b
+	}
+	return ap == bp && net.ParseIP(na).Equal(net.ParseIP(nb))
+}
+
+func parseCIDR(c string) (string, int, error) {
+	c = strings.Trim(c, "[]")
+	_, ipNet, err := net.ParseCIDR(c)
+	if err != nil {
+		return "", 0, err
+	}
+	ones, _ := ipNet.Mask.Size()
+	return ipNet.IP.String(), ones, nil
 }
 
 // per-phase handlers for IPConfig run status
 func (r *IPConfigReconciler) handleConfigUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
-	controllerutils.SetIPConfigStatusInProgress(ipc, "IP configuration is in progress")
+	controllerutils.SetIPConfigStatusInProgress(ipc, "Configuration is in progress")
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
@@ -339,10 +444,10 @@ func (c *IPConfigConfigurationHandler) RunLcaCliIPConfigRun(
 	logger.Info("Scheduling lca-cli ip-config run via systemd-run")
 
 	args := []string{
-		"--property", "ExitType=cgroup",
-		"--unit", "lca-ipconfig-run",
-		"--description", "lifecycle-agent: ip-config run",
-		"lca-cli", "ip-config", "run",
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", controllerutils.IPConfigRunUnit,
+		"--description", controllerutils.IPConfigRunDescription,
+		controllerutils.LcaCliBinaryName, "ip-config", "run",
 	}
 
 	if _, err := c.Executor.Execute("systemd-run", args...); err != nil {

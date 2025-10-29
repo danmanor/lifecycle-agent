@@ -263,15 +263,15 @@ func selectIPOfSameFamily(newIP string, candidates []string) (string, error) {
 // ipFamilyOfString returns "IPv6" if the IP contains a colon, otherwise "IPv4"
 func ipFamilyOfString(ip string) string {
 	if strings.Contains(ip, ":") {
-		return "IPv6"
+		return IPv6FamilyName
 	}
-	return "IPv4"
+	return IPv4FamilyName
 }
 
 func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
-	i.log.Info("Detecting br-ex network interface")
+	i.log.Infof("Detecting %s network interface", BridgeExternalName)
 
-	if output, err := i.executor.Execute("ovs-vsctl", "list-ports", "br-ex"); err == nil {
+	if output, err := i.executor.Execute("ovs-vsctl", "list-ports", BridgeExternalName); err == nil {
 		ports := strings.Fields(string(output))
 		for _, port := range ports {
 			// We want the actual port used by the node, not the patch port
@@ -279,7 +279,7 @@ func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
 			// sudo ovs-vsctl list-ports br-ex
 			// ens3
 			// patch-br-ex_test-infra-cluster-06d0a16b-master-0-to-br-int
-			if !strings.Contains(port, "br-ex") {
+			if !strings.Contains(port, BridgeExternalName) {
 				i.log.Infof("Found interface via ovs-vsctl: %s", port)
 				return port, nil
 			}
@@ -313,8 +313,8 @@ func (i *IPConfigHandler) ensureNodeIPRerunService(newMachineNetwork string) err
 		return fmt.Errorf("failed to reload systemd daemon: %w", err)
 	}
 
-	if _, err := i.executor.Execute("systemctl", "enable", "sno-nodeip-rerun.service"); err != nil {
-		return fmt.Errorf("failed to enable sno-nodeip-rerun.service: %w", err)
+	if _, err := i.executor.Execute("systemctl", "enable", NodeipRerunUnitName); err != nil {
+		return fmt.Errorf("failed to enable %s: %w", NodeipRerunUnitName, err)
 	}
 
 	i.log.Info("Nodeip rerun service configured successfully")
@@ -431,7 +431,7 @@ func (i *IPConfigHandler) createMachineConfig(interfaceName string) (*machinecon
 
 	mc := &machineconfigv1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "10-br-ex",
+			Name: BrExMachineConfigName,
 			Labels: map[string]string{
 				"machineconfiguration.openshift.io/role": "master",
 			},
@@ -483,9 +483,9 @@ func (i *IPConfigHandler) applyNetworkConfigurationMachineConfig(ctx context.Con
 func (i *IPConfigHandler) CreateNetworkConfiguration(ctx context.Context) error {
 	iface, err := i.detectBrExNetworkInterface()
 	if err != nil {
-		return fmt.Errorf("failed to detect br-ex network interface: %w", err)
+		return fmt.Errorf("failed to detect %s network interface: %w", BridgeExternalName, err)
 	}
-	i.log.Infof("Detected br-ex network interface: %s", iface)
+	i.log.Infof("Detected %s network interface: %s", BridgeExternalName, iface)
 
 	if err := i.applyNetworkConfigurationMachineConfig(ctx, iface); err != nil {
 		return fmt.Errorf("failed to apply network configuration machine config: %w", err)

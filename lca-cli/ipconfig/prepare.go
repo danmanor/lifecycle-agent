@@ -35,7 +35,7 @@ func NewPrepareHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClient
 func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) (err error) {
 	p.log.Infof("IP config prepare started with IPv4: %s and IPv6: %s", newIPv4, newIPv6)
 
-	newStateroot, err := p.BuildStaterootName(newIPv4, newIPv6)
+	newStateroot, err := BuildStaterootName(newIPv4, newIPv6)
 	if err != nil {
 		return
 	}
@@ -96,17 +96,6 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 	p.log.Info("IP config prepare done successfully")
 
 	return nil
-}
-
-func (p *PrepareHandler) BuildStaterootName(newIPv4, newIPv6 string) (string, error) {
-	nameParts := []string{"rhcos"}
-	if newIPv4 != "" {
-		nameParts = append(nameParts, common.SanitizeForOsname(newIPv4))
-	}
-	if newIPv6 != "" {
-		nameParts = append(nameParts, common.SanitizeForOsname(newIPv6))
-	}
-	return strings.Join(nameParts, "_"), nil
 }
 
 func (p *PrepareHandler) ensureSysrootWritable() error {

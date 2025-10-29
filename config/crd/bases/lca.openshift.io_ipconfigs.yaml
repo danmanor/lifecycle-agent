@@ -29,17 +29,21 @@ spec:
     - jsonPath: .status.conditions[-1:].message
       name: Details
       type: string
+    - jsonPath: .status.clusterNetwork.ipv4.address
+      name: Current IPv4
+      priority: 1
+      type: string
     - jsonPath: .spec.ipv4.address
       name: Desired IPv4
+      priority: 1
       type: string
-    - jsonPath: .status.clusterIPs.nodeInternalIPs[?(@.family=='IPv4')].address
-      name: Current IPv4
+    - jsonPath: .status.clusterNetwork.ipv6.address
+      name: Current IPv6
+      priority: 1
       type: string
     - jsonPath: .spec.ipv6.address
       name: Desired IPv6
-      type: string
-    - jsonPath: .status.clusterIPs.nodeInternalIPs[?(@.family=='IPv6')].address
-      name: Current IPv6
+      priority: 1
       type: string
     name: v1
     schema:
@@ -152,23 +156,34 @@ spec:
           status:
             description: IPConfigStatus defines the observed state of IPConfig
             properties:
-              clusterIPs:
-                description: ClusterIPs reflects the node internal IPs known to the
-                  cluster
+              clusterNetwork:
+                description: ClusterNetwork reflects the node's IPs and their subnets
+                  as seen on the cluster network
                 properties:
-                  nodeInternalIPs:
-                    items:
-                      description: FamilyIP pairs IP family and address
-                      properties:
-                        address:
-                          type: string
-                        family:
-                          type: string
-                      required:
-                      - address
-                      - family
-                      type: object
-                    type: array
+                  ipv4:
+                    description: IPv4 summarizes the current IPv4 on the cluster network
+                    properties:
+                      address:
+                        description: Address is the node internal IP (plain address,
+                          no prefix)
+                        type: string
+                      machineNetwork:
+                        description: MachineNetwork is the matching machine network
+                          CIDR for the IP
+                        type: string
+                    type: object
+                  ipv6:
+                    description: IPv6 summarizes the current IPv6 on the cluster network
+                    properties:
+                      address:
+                        description: Address is the node internal IP (plain address,
+                          no prefix)
+                        type: string
+                      machineNetwork:
+                        description: MachineNetwork is the matching machine network
+                          CIDR for the IP
+                        type: string
+                    type: object
                 type: object
               conditions:
                 items:
@@ -281,6 +296,47 @@ spec:
                       type: string
                   type: object
                 type: array
+              hostNetwork:
+                description: HostNetwork reflects the actual network configuration
+                  on the host (br-ex)
+                properties:
+                  ipv4:
+                    description: IPFamilyConfig represents a single stack configuration
+                    properties:
+                      address:
+                        description: Address is the full address with prefix length
+                          (e.g., 192.0.2.10/24)
+                        type: string
+                      dnsServer:
+                        description: DNSServer is the DNS server IP to use
+                        type: string
+                      gateway:
+                        description: Gateway is the default gateway address
+                        type: string
+                      machineNetwork:
+                        description: MachineNetwork is the CIDR of the machine network
+                          (e.g., 192.0.2.0/24)
+                        type: string
+                    type: object
+                  ipv6:
+                    description: IPFamilyConfig represents a single stack configuration
+                    properties:
+                      address:
+                        description: Address is the full address with prefix length
+                          (e.g., 192.0.2.10/24)
+                        type: string
+                      dnsServer:
+                        description: DNSServer is the DNS server IP to use
+                        type: string
+                      gateway:
+                        description: Gateway is the default gateway address
+                        type: string
+                      machineNetwork:
+                        description: MachineNetwork is the CIDR of the machine network
+                          (e.g., 192.0.2.0/24)
+                        type: string
+                    type: object
+                type: object
               observedGeneration:
                 format: int64
                 type: integer
@@ -298,14 +354,12 @@ spec:
           rule: self.metadata.name == 'ipconfig'
         - message: can not change spec.ipv4 while ipconfig is in progress
           rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
-            && c.status==''True'') || self.spec.stage==''Idle'' || has(oldSelf.spec.ipv4)
-            && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4)
-            && !has(oldSelf.spec.ipv4)'
+            && c.status==''True'') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4)
+            && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)'
         - message: can not change spec.ipv6 while ipconfig is in progress
           rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
-            && c.status==''True'') || self.spec.stage==''Idle'' || has(oldSelf.spec.ipv6)
-            && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6)
-            && !has(oldSelf.spec.ipv6)'
+            && c.status==''True'') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6)
+            && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)'
     served: true
     storage: true
     subresources:

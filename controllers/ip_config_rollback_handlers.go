@@ -121,10 +121,10 @@ func (r *IPConfigRollbackHandler) PrePivot(ctx context.Context, ipc *ipcv1.IPCon
 func (r *IPConfigRollbackHandler) scheduleIPConfigRollback(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger, stateroot string) error {
 	logger.Info("Scheduling lca-cli ip-config rollback via systemd-run", "stateroot", stateroot)
 	args := []string{
-		"--property", "ExitType=cgroup",
-		"--unit", "lca-ipconfig-rollback",
-		"--description", "lifecycle-agent: ip-config rollback",
-		"lca-cli", "ip-config", "rollback",
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", controllerutils.IPConfigRollbackUnit,
+		"--description", controllerutils.IPConfigRollbackDescription,
+		controllerutils.LcaCliBinaryName, "ip-config", "rollback",
 		"--stateroot", stateroot,
 	}
 	if _, err := r.Executor.Execute("systemd-run", args...); err != nil {
@@ -209,7 +209,7 @@ func (r *IPConfigReconciler) handleRollback(ctx context.Context, ipc *ipcv1.IPCo
 func (r *IPConfigReconciler) handleRollbackUnknown(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error) {
 	controllerutils.SetIPRollbackStatusInProgress(
 		ipc,
-		"IP configuration rollback is in progress",
+		"Rollback is in progress",
 	)
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))

@@ -217,13 +217,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	executor := ops.NewChrootExecutor(newLogger, true, common.Host)
-	op := ops.NewOps(newLogger, executor)
-	rpmOstreeClient := rpmostreeclient.NewClient("ibu-controller", executor)
-	ostreeClient := ostreeclient.NewClient(executor, false)
-	ibuRebootClient := reboot.NewIBURebootClient(&log, executor, rpmOstreeClient, ostreeClient, op)
-	ipcRebootClient := reboot.NewIPCRebootClient(&log, executor, rpmOstreeClient, ostreeClient, op)
-	imageMgmtClient := imagemgmt.NewImageMgmtClient(&log, executor, common.PathOutsideChroot(common.ContainerStoragePath))
+	chrootExecutor := ops.NewChrootExecutor(newLogger, true, common.Host)
+	chrootOp := ops.NewOps(newLogger, chrootExecutor)
+	nsenterExecutor := ops.NewNsenterExecutor(newLogger, true)
+	nsenterOp := ops.NewOps(newLogger, nsenterExecutor)
+	rpmOstreeClient := rpmostreeclient.NewClient("ibu-controller", chrootExecutor)
+	ostreeClient := ostreeclient.NewClient(chrootExecutor, false)
+	ibuRebootClient := reboot.NewIBURebootClient(&log, chrootExecutor, rpmOstreeClient, ostreeClient, chrootOp)
+	ipcRebootClient := reboot.NewIPCRebootClient(&log, chrootExecutor, rpmOstreeClient, ostreeClient, chrootOp)
+	imageMgmtClient := imagemgmt.NewImageMgmtClient(&log, chrootExecutor, common.PathOutsideChroot(common.ContainerStoragePath))
 
 	if err := lcautils.InitIBU(context.TODO(), mgr.GetClient(), &setupLog); err != nil {
 		setupLog.Error(err, "unable to initialize IBU CR")
@@ -251,7 +253,7 @@ func main() {
 	extraManifest := &extramanifest.EMHandler{
 		Client: mgr.GetClient(), DynamicClient: dynamicClient, Log: log.WithName("ExtraManifest")}
 
-	containerStorageMountpointTarget, err := op.GetContainerStorageTarget()
+	containerStorageMountpointTarget, err := chrootOp.GetContainerStorageTarget()
 	if err != nil {
 		setupLog.Error(err, "unable to get container storage mountpoint target")
 		os.Exit(1)
@@ -280,9 +282,9 @@ func main() {
 		Scheme:          mgr.GetScheme(),
 		Precache:        &precache.PHandler{Client: mgr.GetClient(), Log: log.WithName("Precache"), Scheme: mgr.GetScheme()},
 		RPMOstreeClient: rpmOstreeClient,
-		Executor:        executor,
+		Executor:        chrootExecutor,
 		OstreeClient:    ostreeClient,
-		Ops:             op,
+		Ops:             chrootOp,
 		RebootClient:    ibuRebootClient,
 		BackupRestore:   backupRestore,
 		ExtraManifest:   extraManifest,
@@ -293,8 +295,8 @@ func main() {
 			BackupRestore:   backupRestore,
 			ExtraManifest:   extraManifest,
 			ClusterConfig:   &clusterconfig.UpgradeClusterConfigGather{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Log: log},
-			Executor:        executor,
-			Ops:             op,
+			Executor:        chrootExecutor,
+			Ops:             chrootOp,
 			Recorder:        mgr.GetEventRecorderFor("ImageBasedUpgrade"),
 			RPMOstreeClient: rpmOstreeClient,
 			OstreeClient:    ostreeClient,
@@ -317,8 +319,9 @@ func main() {
 		Client:          mgr.GetClient(),
 		NoncachedClient: mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
-		Executor:        executor,
-		Ops:             op,
+		Executor:        chrootExecutor,
+		ChrootOps:       chrootOp,
+		NsenterOps:      nsenterOp,
 		RebootClient:    ipcRebootClient,
 		OstreeClient:    ostreeClient,
 		RPMOstreeClient: rpmOstreeClient,
@@ -326,16 +329,16 @@ func main() {
 		PrepHandler: controllers.NewIPConfigPrepHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
-			executor,
-			op,
+			chrootExecutor,
+			chrootOp,
 			ipcRebootClient,
 			rpmOstreeClient,
 		),
 		ConfigHandler: controllers.NewIPConfigConfigurationHandler(
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
-			executor,
-			op,
+			chrootExecutor,
+			chrootOp,
 			ipcRebootClient,
 			ostreeClient,
 		),
@@ -343,8 +346,8 @@ func main() {
 			mgr.GetClient(),
 			mgr.GetAPIReader(),
 			rpmOstreeClient,
-			executor,
-			op,
+			chrootExecutor,
+			chrootOp,
 			ipcRebootClient,
 		),
 	}).SetupWithManager(mgr); err != nil {
@@ -359,7 +362,7 @@ func main() {
 		Log:             seedgenLog,
 		Scheme:          mgr.GetScheme(),
 		BackupRestore:   backupRestore,
-		Executor:        executor,
+		Executor:        chrootExecutor,
 		Mux:             mux,
 
 		// Cluster data retrieved once during init
