@@ -126,6 +126,14 @@ func runIPConfigPrepare() error {
 		return fmt.Errorf("failed to mark prepare as successful: %w", err)
 	}
 
+	if err := common.FinalizeIPConfigStatus(
+		common.IPConfigPrepareStatusFile,
+		common.IPConfigRunPhaseSucceeded,
+		"ip-config prepare completed successfully",
+	); err != nil {
+		return fmt.Errorf("failed to mark prepare as successful: %w", err)
+	}
+
 	if err := rbClient.RebootToNewStateRoot("ip-config prepare"); err != nil {
 		return fmt.Errorf("failed to reboot to new stateroot: %w", err)
 	}

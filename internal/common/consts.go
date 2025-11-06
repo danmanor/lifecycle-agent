@@ -73,10 +73,11 @@ const (
 	CABundleFilePath                  = "/etc/pki/ca-trust/source/anchors/openshift-config-user-ca-bundle.crt"
 
 	LCAConfigDir               = "/var/lib/lca"
-	IPConfigRunFlagsFile       = LCAConfigDir + "/workspace/ip-config-run.json"
-	IPConfigRunStatusFile      = LCAConfigDir + "/workspace/ip-config-run-status.json"
-	IPConfigPrepareStatusFile  = LCAConfigDir + "/workspace/ip-config-prepare-status.json"
-	IPConfigRollbackStatusFile = LCAConfigDir + "/workspace/ip-config-rollback-status.json"
+	LCAWorkspaceDir            = LCAConfigDir + "/workspace"
+	IPConfigRunFlagsFile       = LCAWorkspaceDir + "/ip-config-run.json"
+	IPConfigRunStatusFile      = LCAWorkspaceDir + "/ip-config-run-status.json"
+	IPConfigPrepareStatusFile  = LCAWorkspaceDir + "/ip-config-prepare-status.json"
+	IPConfigRollbackStatusFile = LCAWorkspaceDir + "/ip-config-rollback-status.json"
 
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800

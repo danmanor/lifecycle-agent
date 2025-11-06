@@ -38,6 +38,7 @@ var podmanRecertArgs = []string{
 //go:generate mockgen -source=ops.go -package=ops -destination=mock_ops.go
 type Ops interface {
 	SystemctlAction(action string, args ...string) (string, error)
+	RunSystemdAction(args ...string) (string, error)
 	RunInHostNamespace(command string, args ...string) (string, error)
 	RunBashInHostNamespace(command string, args ...string) (string, error)
 	RunListOfCommands(cmds []*CMD) error
@@ -110,6 +111,14 @@ func (o *ops) SystemctlAction(action string, args ...string) (string, error) {
 	return output, err
 }
 
+func (o *ops) RunSystemdAction(args ...string) (string, error) {
+	o.log.Infof("Running systemd-run %s", args)
+	output, err := o.hostCommandsExecutor.Execute("systemd-run", args...)
+	if err != nil {
+		err = fmt.Errorf("failed executing systemd-run with args %s: %w", args, err)
+	}
+	return output, err
+}
 func (o *ops) RunBashInHostNamespace(command string, args ...string) (string, error) {
 	args = append([]string{command}, args...)
 	execute, err := o.hostCommandsExecutor.Execute("bash", "-c", strings.Join(args, " "))
@@ -529,48 +538,27 @@ func (o *ops) RunListOfCommands(cmds []*CMD) error {
 }
 
 func (o *ops) ReadFile(filename string) ([]byte, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file %s: %w", filename, err)
-	}
-	return data, nil
+	return os.ReadFile(filename)
 }
 
 func (o *ops) WriteFile(filename string, data []byte, perm os.FileMode) error {
-	if err := os.WriteFile(filename, data, perm); err != nil {
-		return fmt.Errorf("failed to write file %s: %w", filename, err)
-	}
-	return nil
+	return os.WriteFile(filename, data, perm)
 }
 
 func (o *ops) RemoveFile(path string) error {
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("failed to remove %s: %w", path, err)
-	}
-	return nil
+	return os.Remove(path)
 }
 
 func (o *ops) RemoveAllFiles(path string) error {
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("failed to remove all at %s: %w", path, err)
-	}
-	return nil
+	return os.RemoveAll(path)
 }
 
 func (o *ops) ReadDir(path string) ([]os.DirEntry, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory %s: %w", path, err)
-	}
-	return entries, nil
+	return os.ReadDir(path)
 }
 
 func (o *ops) StatFile(name string) (os.FileInfo, error) {
-	info, err := os.Stat(name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat %s: %w", name, err)
-	}
-	return info, nil
+	return os.Stat(name)
 }
 
 func (o *ops) IsNotExist(err error) bool {

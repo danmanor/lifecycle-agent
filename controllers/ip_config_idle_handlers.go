@@ -3,8 +3,10 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
@@ -13,6 +15,8 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
+	lcautils "github.com/openshift-kni/lifecycle-agent/utils"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -48,19 +52,28 @@ func NewIPConfigIdleStageHandler(
 func (h *IPConfigIdleStageHandler) Handle(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
-) (res ctrl.Result, err error) {
+) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("IPConfigIdle")
 	logger.Info("Starting handleIdle")
 
-	idleCond := meta.FindStatusCondition(ipc.Status.Conditions, string(controllerutils.ConditionTypes.Idle))
-	if idleCond != nil && idleCond.Status == metav1.ConditionFalse &&
-		(idleCond.Reason == string(controllerutils.ConditionReasons.FinalizeFailed) ||
-			idleCond.Reason == string(controllerutils.ConditionReasons.AbortFailed)) {
-		if done, cerr := h.checkIPManualCleanup(ctx, ipc); cerr != nil {
-			return requeueWithShortInterval(), cerr
-		} else if done {
-			logger.Info("Manual cleanup annotation is found, removed annotation and retrying idle tasks")
+	recertCacheInterval := getRecertCacheInterval(ipc)
+	if shouldRefresh := h.shouldRefreshRecertImage(ipc, recertCacheInterval); shouldRefresh {
+		if err := h.refreshRecertImage(ctx, ipc, logger); err != nil {
+			return requeueWithError(fmt.Errorf("failed to refresh recert image: %w", err))
 		}
+
+		if ipc.Annotations == nil {
+			ipc.Annotations = map[string]string{}
+		}
+
+		ipc.Annotations[controllerutils.IPConfigRecertCacheLastRefreshAnnotation] = time.Now().UTC().Format(time.RFC3339)
+		if err := h.Client.Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update last recert cache check annotation: %w", err))
+		}
+	}
+
+	if err := h.handleManualCleanupIfFailed(ctx, ipc, logger); err != nil {
+		return requeueWithError(fmt.Errorf("failed to handle manual cleanup if failed: %w", err))
 	}
 
 	if isIPTransitionRequested(ipc) && ipc.Status.ValidNextStages != nil {
@@ -70,20 +83,19 @@ func (h *IPConfigIdleStageHandler) Handle(
 				controllerutils.ConditionReasons.InvalidTransition,
 				fmt.Sprintf("invalid IPConfig stage: %s", ipc.Spec.Stage),
 			)
-			if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 			}
-			return doNotRequeue(), nil
+			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
 		}
 	}
 
 	logger.Info("Running health checks")
 	if err := CheckHealth(ctx, h.NoncachedClient, logger); err != nil {
 		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
-		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Finalizing, msg)
+		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Failed, msg)
 		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
-			res, ierr := requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-			return res, ierr
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
 		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
 	}
@@ -91,7 +103,7 @@ func (h *IPConfigIdleStageHandler) Handle(
 	if err := h.cleanup(logger); err != nil {
 		controllerutils.SetIPIdleStatusFalse(
 			ipc,
-			controllerutils.ConditionReasons.FinalizeFailed,
+			controllerutils.ConditionReasons.Failed,
 			fmt.Sprintf("failed to cleanup: %v. Perform cleanup manually then add '%s' annotation to IPConfig CR to transition back to Idle",
 				err,
 				controllerutils.ManualCleanupAnnotation,
@@ -103,20 +115,6 @@ func (h *IPConfigIdleStageHandler) Handle(
 		return requeueWithError(fmt.Errorf("failed to cleanup: %w", err))
 	}
 
-	lcaHostCopy := common.PathOutsideChroot(controllerutils.LcaCliBinaryHostPath)
-	if err := h.ChrootOps.RemoveFile(lcaHostCopy); err != nil && !h.ChrootOps.IsNotExist(err) {
-		controllerutils.SetIPIdleStatusFalse(
-			ipc,
-			controllerutils.ConditionReasons.FinalizeFailed,
-			fmt.Sprintf("failed to remove temporary lca-cli host copy: %v.", err),
-		)
-		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-		}
-
-		return requeueWithError(fmt.Errorf("failed to remove temporary lca-cli host copy: %w", err))
-	}
-
 	controllerutils.ResetStatusConditions(&ipc.Status.Conditions, ipc.Generation)
 	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -124,7 +122,7 @@ func (h *IPConfigIdleStageHandler) Handle(
 
 	logger.Info("handleIdle completed successfully")
 
-	return doNotRequeue(), nil
+	return requeueWithCustomInterval(getRecertCacheInterval(ipc)), nil
 }
 
 func (h *IPConfigIdleStageHandler) cleanup(logger logr.Logger) error {
@@ -248,4 +246,114 @@ func getStaterootsToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]string, e
 	}
 
 	return toRemove, nil
+}
+
+// shouldRefreshRecertImage determines if enough time has passed to run the recert image cache refresh again
+func (h *IPConfigIdleStageHandler) shouldRefreshRecertImage(ipc *ipcv1.IPConfig, interval time.Duration) bool {
+	if ipc.Annotations == nil {
+		return true
+	}
+	last := ipc.Annotations[controllerutils.IPConfigRecertCacheLastRefreshAnnotation]
+	if last == "" {
+		return true
+	}
+	ts, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return true
+	}
+	return time.Since(ts) >= interval
+}
+
+// getRecertImageFromIPC resolves the recert image to use in priority: spec, env, default
+func getRecertImage(ipc *ipcv1.IPConfig) string {
+	if ipc.Spec.Recert != nil && ipc.Spec.Recert.Image != "" {
+		return ipc.Spec.Recert.Image
+	}
+	if v := os.Getenv(common.RecertImageEnvKey); v != "" {
+		return v
+	}
+	return common.DefaultRecertImage
+}
+
+func getRecertCacheInterval(ipc *ipcv1.IPConfig) time.Duration {
+	if ipc.Spec.Recert != nil && ipc.Spec.Recert.CacheInterval.Duration > 0 {
+		return ipc.Spec.Recert.CacheInterval.Duration
+	}
+	return 1 * time.Hour
+}
+
+// refreshRecertImage pulls the recert image
+func (h *IPConfigIdleStageHandler) refreshRecertImage(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) error {
+	image := getRecertImage(ipc)
+	if image == "" {
+		return nil
+	}
+
+	authFile := common.ImageRegistryAuthFile
+	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
+		pullSecret, err := lcautils.GetSecretData(
+			ctx, ipc.Spec.Recert.PullSecretRef.Name,
+			common.LcaNamespace,
+			corev1.DockerConfigJsonKey,
+			h.Client,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to get pull-secret with the name %s in namespace %s holding the key %s: %w",
+				ipc.Spec.Recert.PullSecretRef.Name,
+				common.LcaNamespace,
+				corev1.DockerConfigJsonKey,
+				err,
+			)
+		}
+
+		tempAuthFile, err := os.CreateTemp(os.TempDir(), "recert-pull-secret.json")
+		if err != nil {
+			return fmt.Errorf("failed to create temporary pull secret file: %w", err)
+		}
+		defer tempAuthFile.Close()
+
+		if _, err := tempAuthFile.Write([]byte(pullSecret)); err != nil {
+			return fmt.Errorf("failed to write pull secret to temporary file: %w", err)
+		}
+
+		authFile = tempAuthFile.Name()
+	}
+
+	command := "podman"
+	if ipc.Spec.Proxy != nil {
+		noProxy := strings.Join(ipc.Spec.Proxy.NoProxy, ",")
+		httpProxy := ipc.Spec.Proxy.HTTPProxy
+		httpsProxy := ipc.Spec.Proxy.HTTPSProxy
+		if httpProxy != "" || httpsProxy != "" || noProxy != "" {
+			command = fmt.Sprintf("HTTP_PROXY=%s HTTPS_PROXY=%s NO_PROXY=%s %s", httpProxy, httpsProxy, noProxy, command)
+		}
+	}
+
+	if _, err := h.ChrootOps.RunBashInHostNamespace(command, "pull", "--authfile", authFile, image); err != nil {
+		return fmt.Errorf("failed to pull recert image %s: %w", image, err)
+	}
+
+	logger.Info("recert image cached on host", "image", image)
+
+	return nil
+}
+
+func (h *IPConfigIdleStageHandler) handleManualCleanupIfFailed(
+	ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger,
+) error {
+	idleCond := meta.FindStatusCondition(ipc.Status.Conditions, string(controllerutils.ConditionTypes.Idle))
+	if idleCond != nil && idleCond.Status == metav1.ConditionFalse &&
+		idleCond.Reason == string(controllerutils.ConditionReasons.Failed) {
+		done, err := h.checkIPManualCleanup(ctx, ipc)
+		if err != nil {
+			return fmt.Errorf("failed to check manual cleanup: %w", err)
+		}
+
+		if done {
+			logger.Info("Manual cleanup annotation is found, removed annotation and retrying idle tasks")
+		}
+	}
+
+	return nil
 }

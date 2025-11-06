@@ -125,10 +125,10 @@ func (r *IPConfigTwoPhaseRollbackHandler) PrePivot(
 		return requeueWithError(fmt.Errorf("failed to save IPConfig CR before pivot: %w", err))
 	}
 
-	if err := r.scheduleIPConfigRollback(ctx, ipc, logger, stateroot); err != nil {
+	if err := r.scheduleIPConfigRollback(logger, stateroot); err != nil {
 		controllerutils.SetIPRollbackStatusFailed(
 			ipc,
-			err.Error(),
+			fmt.Errorf("failed to schedule ip-config rollback: %w", err).Error(),
 		)
 		if err := r.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -142,8 +142,6 @@ func (r *IPConfigTwoPhaseRollbackHandler) PrePivot(
 }
 
 func (r *IPConfigTwoPhaseRollbackHandler) scheduleIPConfigRollback(
-	ctx context.Context,
-	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
 	stateroot string,
 ) error {
@@ -155,15 +153,7 @@ func (r *IPConfigTwoPhaseRollbackHandler) scheduleIPConfigRollback(
 		controllerutils.LcaCliBinaryName, "ip-config", "rollback",
 		"--stateroot", stateroot,
 	}
-	if _, err := r.Ops.SystemctlAction("run", args...); err != nil {
-		controllerutils.SetIPRollbackStatusFailed(
-			ipc,
-			fmt.Errorf("failed to schedule ip-config rollback: %w", err).Error(),
-		)
-		if err := r.Client.Status().Update(ctx, ipc); err != nil {
-			return fmt.Errorf("failed to update ipconfig status: %w", err)
-		}
-
+	if _, err := r.Ops.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule ip-config rollback: %w", err)
 	}
 
@@ -213,10 +203,10 @@ func (h *IPConfigRollbackStageHandler) Handle(
 				ipc,
 				"invalid transition: "+string(ipc.Spec.Stage),
 			)
-			if err := h.Client.Status().Update(ctx, ipc); err != nil {
-				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			}
-			return doNotRequeue(), nil
+			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
 		}
 	}
 

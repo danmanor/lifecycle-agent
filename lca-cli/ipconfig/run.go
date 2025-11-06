@@ -125,7 +125,7 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 		return err
 	}
 
-	if err := i.runRecert(ctx, installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs); err != nil {
+	if err := i.runRecert(installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs); err != nil {
 		return err
 	}
 
@@ -159,7 +159,6 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 }
 
 func (i *IPConfigHandler) runRecert(
-	ctx context.Context,
 	installConfig string,
 	ingressCertificateCN string,
 	cryptoDir string,
@@ -192,42 +191,7 @@ func (i *IPConfigHandler) runRecert(
 	); err != nil {
 		return fmt.Errorf("failed to create recert configuration file: %w", err)
 	}
-
-	if _, err := i.ops.RunInHostNamespace("podman", "image", "exists", i.recertImage); err != nil {
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-		_ = wait.PollUntilContextCancel(ctxWithTimeout, time.Second, true, func(ctx context.Context) (bool, error) {
-			i.log.Info("pulling recert image")
-			command := "podman"
-			if i.Proxy != nil && (i.Proxy.HTTPProxy != "" || i.Proxy.HTTPSProxy != "" || i.Proxy.NoProxy != "") {
-				command = fmt.Sprintf("HTTP_PROXY=%s HTTPS_PROXY=%s NO_PROXY=%s %s", i.Proxy.HTTPProxy, i.Proxy.HTTPSProxy, i.Proxy.NoProxy, command)
-			}
-			authFile := common.ImageRegistryAuthFile
-			if i.PullSecretFile != "" {
-				authFile = i.PullSecretFile
-			}
-			if _, err := i.ops.RunBashInHostNamespace(command, "pull", "--authfile", authFile, i.recertImage); err != nil {
-				i.log.Warnf("failed to pull recert image, will retry, err: %s", err.Error())
-				return false, nil
-			}
-			return true, nil
-		})
-	}
-
 	i.log.Info("Starting recert full flow")
-
-	var additionalArgs []string
-	if i.Proxy != nil {
-		if i.Proxy.HTTPProxy != "" {
-			additionalArgs = append(additionalArgs, "-e", fmt.Sprintf("HTTP_PROXY=%s", i.Proxy.HTTPProxy))
-		}
-		if i.Proxy.HTTPSProxy != "" {
-			additionalArgs = append(additionalArgs, "-e", fmt.Sprintf("HTTPS_PROXY=%s", i.Proxy.HTTPSProxy))
-		}
-		if i.Proxy.NoProxy != "" {
-			additionalArgs = append(additionalArgs, "-e", fmt.Sprintf("NO_PROXY=%s", i.Proxy.NoProxy))
-		}
-	}
 
 	authFile := common.ImageRegistryAuthFile
 	if i.PullSecretFile != "" {
@@ -240,7 +204,7 @@ func (i *IPConfigHandler) runRecert(
 		path.Join(i.workingDir, recert.RecertConfigFile),
 		nil,
 		nil,
-		append(additionalArgs, "-v", fmt.Sprintf("%s:%s", i.workingDir, i.workingDir))...,
+		"-v", fmt.Sprintf("%s:%s", i.workingDir, i.workingDir),
 	)
 	if err != nil {
 		return fmt.Errorf("failed recert full flow: %w", err)

@@ -131,13 +131,28 @@ spec:
                       type: string
                     type: array
                 type: object
-              pullSecretRef:
-                description: pullSecretRef is the name of a Secret in the openshift-config
-                  namespace containing .dockerconfigjson
-                type: string
-              recertImage:
-                description: Recert image for certificate rotation during config stage
-                type: string
+              recert:
+                description: Recert configuration
+                properties:
+                  cacheInterval:
+                    description: |-
+                      cacheInterval defines how often the controller attempts to cache the recert image on the host
+                      when IPConfig is Idle. If unset, a default is used.
+                    type: string
+                  image:
+                    description: image is the full pull-spec of the recert container
+                      image to use
+                    type: string
+                  pullSecretRef:
+                    description: pullSecretRef is the name of a Secret in the lifecycle-agent
+                      namespace containing .dockerconfigjson
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
               stage:
                 description: IPConfigStage defines the type for the stage field
                 enum:

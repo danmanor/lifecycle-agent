@@ -40,6 +40,7 @@ import (
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
 // IPConfigReconciler reconciles an IPConfig object
 type IPConfigReconciler struct {

@@ -448,6 +448,25 @@ func (mr *MockOpsMockRecorder) RunRecert(recertContainerImage, authFile, recertC
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RunRecert", reflect.TypeOf((*MockOps)(nil).RunRecert), varargs...)
 }
 
+// RunSystemdAction mocks base method.
+func (m *MockOps) RunSystemdAction(args ...string) (string, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{}
+	for _, a := range args {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "RunSystemdAction", varargs...)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RunSystemdAction indicates an expected call of RunSystemdAction.
+func (mr *MockOpsMockRecorder) RunSystemdAction(args ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RunSystemdAction", reflect.TypeOf((*MockOps)(nil).RunSystemdAction), args...)
+}
+
 // RunUnauthenticatedEtcdServer mocks base method.
 func (m *MockOps) RunUnauthenticatedEtcdServer(authFile, name string) error {
 	m.ctrl.T.Helper()

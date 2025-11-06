@@ -74,10 +74,10 @@ func (h *IPConfigConfigStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPCo
 				ipc,
 				"invalid transition: "+string(ipc.Spec.Stage),
 			)
-			if err := h.Client.Status().Update(ctx, ipc); err != nil {
-				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			}
-			return doNotRequeue(), nil
+			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
 		}
 	}
 
@@ -176,7 +176,10 @@ func (c *IPConfigTwoPhaseConfigurationHandler) PrePivot(
 	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePrepivot)
 
 	if err := c.writeIPConfigRunConfig(ipc); err != nil {
-		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config run config: %s", err.Error()))
+		controllerutils.SetIPConfigStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to write ip-config run config: %s", err.Error()),
+		)
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -185,7 +188,10 @@ func (c *IPConfigTwoPhaseConfigurationHandler) PrePivot(
 	}
 
 	if err := c.RunLcaCliIPConfigRun(logger); err != nil {
-		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config: %s", err.Error()))
+		controllerutils.SetIPConfigStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to run ip-config: %s", err.Error()),
+		)
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -225,10 +231,11 @@ func (c *IPConfigTwoPhaseConfigurationHandler) PostPivot(
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	// rely on controller reconcile to refresh host/cluster network statuses continuously
-
 	if err := statusIPsMatchSpec(ipc); err != nil {
-		controllerutils.SetIPConfigStatusInProgress(ipc, fmt.Sprintf("Waiting for current IPs to match spec: %s", err.Error()))
+		controllerutils.SetIPConfigStatusInProgress(
+			ipc,
+			fmt.Sprintf("Waiting for current IPs to match spec: %s", err.Error()),
+		)
 		if err := c.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -237,6 +244,14 @@ func (c *IPConfigTwoPhaseConfigurationHandler) PostPivot(
 	}
 
 	if err := c.RebootClient.DisableInitMonitor(); err != nil {
+		controllerutils.SetIPConfigStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to disable init monitor: %s", err.Error()),
+		)
+		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
 		return requeueWithError(fmt.Errorf("failed to disable init monitor: %w", err))
 	}
 
@@ -427,6 +442,7 @@ func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1
 			cfg.IPv4DNSServer = v.DNSServer
 		}
 	}
+
 	if v := ipc.Spec.IPv6; v != nil {
 		if v.Address != "" {
 			cfg.IPv6Address = strings.Trim(strings.Split(v.Address, "/")[0], "[]")
@@ -441,6 +457,7 @@ func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1
 			cfg.IPv6DNSServer = v.DNSServer
 		}
 	}
+
 	if p := ipc.Spec.Proxy; p != nil {
 		if p.HTTPProxy != "" {
 			cfg.HTTPProxy = p.HTTPProxy
@@ -451,6 +468,11 @@ func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1
 		if len(p.NoProxy) > 0 {
 			cfg.NoProxy = strings.Join(p.NoProxy, ",")
 		}
+	}
+
+	recertImage := getRecertImage(ipc)
+	if recertImage != "" {
+		cfg.RecertImage = recertImage
 	}
 
 	data, err := json.Marshal(cfg)
@@ -477,7 +499,7 @@ func (c *IPConfigTwoPhaseConfigurationHandler) RunLcaCliIPConfigRun(
 		controllerutils.LcaCliBinaryName, "ip-config", "run",
 	}
 
-	if _, err := c.Ops.SystemctlAction("run", args...); err != nil {
+	if _, err := c.Ops.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config run: %w", err)
 	}
 

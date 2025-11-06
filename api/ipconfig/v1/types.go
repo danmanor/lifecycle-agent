@@ -105,16 +105,33 @@ type ProxyConfig struct {
 	NoProxy []string `json:"noProxy,omitempty"`
 }
 
+type PullSecretRef struct {
+	// +kubebuilder:validation:Required
+	// +required
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	Name string `json:"name"`
+}
+
+// RecertSpec defines image pull settings for recert usage in IP config flow
+type RecertSpec struct {
+	// pullSecretRef is the name of a Secret in the lifecycle-agent namespace containing .dockerconfigjson
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	PullSecretRef *PullSecretRef `json:"pullSecretRef,omitempty"`
+	// image is the full pull-spec of the recert container image to use
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	Image string `json:"image,omitempty"`
+	// cacheInterval defines how often the controller attempts to cache the recert image on the host
+	// when IPConfig is Idle. If unset, a default is used.
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	CacheInterval metav1.Duration `json:"cacheInterval,omitempty"`
+}
+
 // IPConfigSpec defines the desired state of IPConfig
 type IPConfigSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=Idle;Prep;Config;Rollback
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Stage"
 	Stage IPConfigStage `json:"stage,omitempty"`
-
-	// pullSecretRef is the name of a Secret in the openshift-config namespace containing .dockerconfigjson
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Pull Secret Reference",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	PullSecretRef string `json:"pullSecretRef,omitempty"`
 
 	// IPv4 stack (omit for IPv6-only)
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="IPv4"
@@ -132,9 +149,9 @@ type IPConfigSpec struct {
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy"
 	Proxy *ProxyConfig `json:"proxy,omitempty"`
 
-	// Recert image for certificate rotation during config stage
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Recert Image",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	RecertImage string `json:"recertImage,omitempty"`
+	// Recert configuration
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Recert"
+	Recert *RecertSpec `json:"recert,omitempty"`
 
 	// AutoRollbackOnFailure defines automatic rollback settings for IPConfig if the configuration
 	// does not complete within the specified time limit. Behavior mirrors IBU.

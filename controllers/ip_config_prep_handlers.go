@@ -75,10 +75,10 @@ func (r *IPConfigPrepStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPConf
 			ipc,
 			fmt.Sprintf("validation of configuration flow readiness failed: %s", err.Error()),
 		)
-		if err := r.Client.Status().Update(ctx, ipc); err != nil {
+		if uerr := r.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
-		return doNotRequeue(), nil
+		return requeueWithError(fmt.Errorf("validation of configuration flow readiness failed: %w", err))
 	}
 
 	if err := statusIPsMatchSpec(ipc); err == nil {
@@ -262,7 +262,10 @@ func (p *IPConfigTwoPhasePrepHandler) PostPivot(
 
 	log.FromContext(ctx).Info("Starting health check for different components")
 	if err := CheckHealth(ctx, p.NoncachedClient, logger); err != nil {
-		controllerutils.SetIPPrepStatusInProgress(ipc, fmt.Sprintf("Waiting for system to stabilize in new stateroot: %s", err.Error()))
+		controllerutils.SetIPPrepStatusInProgress(
+			ipc,
+			fmt.Sprintf("Waiting for system to stabilize in new stateroot: %s", err.Error()),
+		)
 		if err := p.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
@@ -272,6 +275,13 @@ func (p *IPConfigTwoPhasePrepHandler) PostPivot(
 	}
 
 	if err := p.startIPConfigInitMonitor(ipc, logger); err != nil {
+		controllerutils.SetIPPrepStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to start ip-config init monitor: %s", err.Error()),
+		)
+		if err := p.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
 		return requeueWithError(fmt.Errorf("failed to start ip-config init monitor: %w", err))
 	}
 
@@ -316,7 +326,7 @@ func (p *IPConfigTwoPhasePrepHandler) startIPConfigInitMonitor(
 		controllerutils.LcaCliBinaryName, "init-monitor", "--monitor", "--mode", "ipconfig",
 	}
 
-	if _, err := p.ChrootOps.SystemctlAction("run", monitorArgs...); err != nil {
+	if _, err := p.ChrootOps.RunSystemdAction(monitorArgs...); err != nil {
 		return fmt.Errorf("failed to start ip-config init monitor: %w", err)
 	}
 
@@ -463,7 +473,7 @@ func (p *IPConfigTwoPhasePrepHandler) RunLcaCliIPConfigPrepare(
 		args = append(args, "--ipv6-address", ipv6Addr)
 	}
 
-	if _, err := p.ChrootOps.SystemctlAction("run", args...); err != nil {
+	if _, err := p.ChrootOps.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
 	}
 

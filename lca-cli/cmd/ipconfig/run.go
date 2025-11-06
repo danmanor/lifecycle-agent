@@ -55,6 +55,7 @@ var (
 	httpsProxy         string
 	noProxy            string
 	pullSecretFile     string
+	recertImage        string
 )
 
 const (
@@ -78,6 +79,7 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretFile, "pull-secret-file", "", "Path to pull secret auth file to use for image pulls")
+	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
 }
 
 var ipConfigRunCmd = &cobra.Command{
@@ -116,6 +118,7 @@ func runIPConfigChange() error {
 			httpsProxy = cfg.HTTPSProxy
 			noProxy = cfg.NoProxy
 			pullSecretFile = cfg.PullSecretFile
+			recertImage = cfg.RecertImage
 		} else {
 			pkgLog.Warnf("failed to unmarshal ip-config run config: %v", jsonErr)
 		}
@@ -137,6 +140,10 @@ func runIPConfigChange() error {
 		ipv6Address, ipv6MachineNetwork, ipv6Gateway, ipv6DNS,
 		effectivePrimary,
 	)
+
+	if recertImage == "" {
+		recertImage = common.DefaultRecertImage
+	}
 
 	var hostCommandsExecutor ops.Execute
 	if _, err := os.Stat(common.Host); err == nil {
@@ -162,8 +169,8 @@ func runIPConfigChange() error {
 		opsInterface,
 		hostCommandsExecutor,
 		client,
-		pkgRecertImage,
-		common.PathOutsideChroot(common.OptOpenshift),
+		recertImage,
+		common.LCAWorkspaceDir,
 		ipConfigs,
 		&ipconfig.ProxyConfig{HTTPProxy: httpProxy, HTTPSProxy: httpsProxy, NoProxy: noProxy},
 		pullSecretFile,
@@ -182,9 +189,6 @@ func runIPConfigChange() error {
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config run status: %w", internalErr)
 		}
-
-		rbClient.AutoRollbackIfEnabled(reboot.IPConfigRunComponent, "ip-config run failed")
-		return fmt.Errorf("failed to run IP config process: %w", err)
 	}
 
 	if err := common.FinalizeIPConfigStatus(

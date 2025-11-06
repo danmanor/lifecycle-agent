@@ -13,6 +13,7 @@ type IPConfigRunConfig struct {
 	HTTPSProxy         string `json:"https-proxy,omitempty"`
 	NoProxy            string `json:"no-proxy,omitempty"`
 	PullSecretFile     string `json:"pull-secret-file,omitempty"`
+	RecertImage        string `json:"recert-image,omitempty"`
 }
 
 // IPConfigRunStatusPhase enumerates phases of the ip-config run lifecycle.

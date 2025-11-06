@@ -52,10 +52,12 @@ func ReadIPConfigStatus(filePath string, fops FileOpsReader) (IPConfigRunStatusP
 		}
 		return IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)
 	}
+
 	var st IPConfigRunStatus
 	if err := json.Unmarshal(data, &st); err != nil {
 		return IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to parse status file %s: %w", filePath, err)
 	}
+
 	switch st.Phase {
 	case IPConfigRunPhaseRunning, IPConfigRunPhaseSucceeded, IPConfigRunPhaseFailed:
 		return st.Phase, st.Message, nil
