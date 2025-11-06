@@ -21,10 +21,10 @@ type IPConfigRunConfig struct {
 type IPConfigRunStatusPhase string
 
 const (
-	IPConfigRunPhaseUnknown   IPConfigRunStatusPhase = "unknown"
-	IPConfigRunPhaseRunning   IPConfigRunStatusPhase = "running"
-	IPConfigRunPhaseSucceeded IPConfigRunStatusPhase = "succeeded"
-	IPConfigRunPhaseFailed    IPConfigRunStatusPhase = "failed"
+	IPConfigPhaseUnknown   IPConfigRunStatusPhase = "unknown"
+	IPConfigPhaseRunning   IPConfigRunStatusPhase = "running"
+	IPConfigPhaseSucceeded IPConfigRunStatusPhase = "succeeded"
+	IPConfigPhaseFailed    IPConfigRunStatusPhase = "failed"
 )
 
 // IPConfigRunStatus describes current state of lca-cli ip-config run.

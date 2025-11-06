@@ -24,7 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	syaml "sigs.k8s.io/yaml"
 
-	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
@@ -54,21 +53,14 @@ type IPConfigReconciler struct {
 	OstreeClient    ostreeclient.IClient
 	Clientset       *kubernetes.Clientset
 	IdleHandler     IPConfigStageHandler
-	PrepHandler     IPConfigStageHandler
 	ConfigHandler   IPConfigStageHandler
 	RollbackHandler IPConfigStageHandler
 	Mux             *sync.Mutex
 }
 
-//go:generate mockgen -source=ip_config_controller.go -package=controllers -destination=ip_config_controller_mock.go
-
+//go:generate mockgen -source=ipc_controller.go -package=controllers -destination=ipc_controller_mock.go
 type IPConfigStageHandler interface {
 	Handle(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error)
-}
-
-type IPConfigTwoPhaseStageHandler interface {
-	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
-	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 }
 
 func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
@@ -136,8 +128,6 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	switch ipc.Spec.Stage {
 	case ipcv1.IPStages.Idle:
 		return r.IdleHandler.Handle(ctx, ipc)
-	case ipcv1.IPStages.Prep:
-		return r.PrepHandler.Handle(ctx, ipc)
 	case ipcv1.IPStages.Config:
 		return r.ConfigHandler.Handle(ctx, ipc)
 	case ipcv1.IPStages.Rollback:
@@ -152,22 +142,18 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 func validNextStages(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclient.IClient) ([]ipcv1.IPConfigStage, error) {
 	inProgressStage := controllerutils.GetIPInProgressStage(ipc)
 
-	if inProgressStage == ipcv1.IPStages.Idle || inProgressStage == ipcv1.IPStages.Rollback || controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Rollback) {
-		// no valid transition if aborting/abort failed/finalizing/finalize failed/rollback in progress/rollback failed
+	if inProgressStage == ipcv1.IPStages.Idle ||
+		inProgressStage == ipcv1.IPStages.Rollback ||
+		controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Rollback) {
 		return []ipcv1.IPConfigStage{}, nil
 	}
 
-	if inProgressStage == ipcv1.IPStages.Prep || controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Prep) {
-		isInNewStateroot := isTargetStaterootBooted(ipc, rpmOstreeClient)
-		if isInNewStateroot {
+	if inProgressStage == ipcv1.IPStages.Config ||
+		controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Config) {
+		if isTargetStaterootBooted(ipc, rpmOstreeClient) {
 			return []ipcv1.IPConfigStage{ipcv1.IPStages.Rollback}, nil
-		} else {
-			return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}, nil
 		}
-	}
-
-	if inProgressStage == ipcv1.IPStages.Config || controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Config) {
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Rollback}, nil
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle}, nil
 	}
 
 	// no in progress stage, check completed stages in reverse order
@@ -177,11 +163,8 @@ func validNextStages(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclient.IClien
 	if controllerutils.IsIPStageCompleted(ipc, ipcv1.IPStages.Config) {
 		return []ipcv1.IPConfigStage{ipcv1.IPStages.Idle, ipcv1.IPStages.Rollback}, nil
 	}
-	if controllerutils.IsIPStageCompleted(ipc, ipcv1.IPStages.Prep) {
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Config, ipcv1.IPStages.Rollback}, nil
-	}
 	if controllerutils.IsIPStageCompleted(ipc, ipcv1.IPStages.Idle) {
-		return []ipcv1.IPConfigStage{ipcv1.IPStages.Prep}, nil
+		return []ipcv1.IPConfigStage{ipcv1.IPStages.Config}, nil
 	}
 
 	// initial IPConfig creation - no idle condition

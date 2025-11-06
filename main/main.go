@@ -331,23 +331,15 @@ func main() {
 			ostreeClient,
 			rpmOstreeClient,
 		),
-		PrepHandler: controllers.NewIPConfigPrepStageHandler(
-			mgr.GetClient(),
-			mgr.GetAPIReader(),
-			chrootOp,
-			controllers.NewIPConfigTwoPhasePrepHandler(
-				mgr.GetClient(),
-				mgr.GetAPIReader(),
-				chrootOp,
-				rpmOstreeClient,
-			),
-		),
 		ConfigHandler: controllers.NewIPConfigConfigStageHandler(
 			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			rpmOstreeClient,
 			chrootOp,
-			controllers.NewIPConfigTwoPhaseConfigurationHandler(
+			controllers.NewIPConfigConfigPhasesHandler(
 				mgr.GetClient(),
 				mgr.GetAPIReader(),
+				rpmOstreeClient,
 				chrootOp,
 				ipcRebootClient,
 			),
@@ -355,7 +347,7 @@ func main() {
 		RollbackHandler: controllers.NewIPConfigRollbackStageHandler(
 			mgr.GetClient(),
 			chrootOp,
-			controllers.NewIPConfigTwoPhaseRollbackHandler(
+			controllers.NewIPConfigRollbackPhasesHandler(
 				mgr.GetClient(),
 				mgr.GetAPIReader(),
 				rpmOstreeClient,

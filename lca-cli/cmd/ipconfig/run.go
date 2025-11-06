@@ -95,7 +95,7 @@ var ipConfigRunCmd = &cobra.Command{
 func runIPConfigChange() error {
 	err := common.WriteIPConfigStatus(common.IPConfigRunStatusFile,
 		common.IPConfigRunStatus{
-			Phase:     common.IPConfigRunPhaseRunning,
+			Phase:     common.IPConfigPhaseRunning,
 			Message:   "ip-config run started",
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		})
@@ -183,7 +183,7 @@ func runIPConfigChange() error {
 	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRunStatusFile,
-			common.IPConfigRunPhaseFailed,
+			common.IPConfigPhaseFailed,
 			fmt.Sprintf("ip-config run failed: %v", err),
 		)
 		if internalErr != nil {
@@ -193,7 +193,7 @@ func runIPConfigChange() error {
 
 	if err := common.FinalizeIPConfigStatus(
 		common.IPConfigRunStatusFile,
-		common.IPConfigRunPhaseSucceeded,
+		common.IPConfigPhaseSucceeded,
 		"ip-config run completed successfully",
 	); err != nil {
 		return fmt.Errorf("failed to mark IP config run as successful: %w", err)

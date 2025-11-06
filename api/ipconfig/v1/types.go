@@ -60,12 +60,10 @@ type IPConfigStage string
 
 var IPStages = struct {
 	Idle     IPConfigStage
-	Prep     IPConfigStage
 	Config   IPConfigStage
 	Rollback IPConfigStage
 }{
 	Idle:     "Idle",
-	Prep:     "Prep",
 	Config:   "Config",
 	Rollback: "Rollback",
 }
@@ -129,7 +127,7 @@ type RecertSpec struct {
 // IPConfigSpec defines the desired state of IPConfig
 type IPConfigSpec struct {
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=Idle;Prep;Config;Rollback
+	// +kubebuilder:validation:Enum=Idle;Config;Rollback
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Stage"
 	Stage IPConfigStage `json:"stage,omitempty"`
 

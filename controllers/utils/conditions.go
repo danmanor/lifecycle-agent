@@ -298,8 +298,6 @@ func GetIPInProgressConditionType(stage ipcv1.IPConfigStage) (conditionType Cond
 	switch stage {
 	case ipcv1.IPStages.Idle:
 		conditionType = ConditionTypes.Idle
-	case ipcv1.IPStages.Prep:
-		conditionType = ConditionTypes.PrepInProgress
 	case ipcv1.IPStages.Config:
 		conditionType = ConditionTypes.ConfigInProgress
 	case ipcv1.IPStages.Rollback:
@@ -313,8 +311,6 @@ func GetIPCompletedConditionType(stage ipcv1.IPConfigStage) (conditionType Condi
 	switch stage {
 	case ipcv1.IPStages.Idle:
 		conditionType = ConditionTypes.Idle
-	case ipcv1.IPStages.Prep:
-		conditionType = ConditionTypes.PrepCompleted
 	case ipcv1.IPStages.Config:
 		conditionType = ConditionTypes.ConfigCompleted
 	case ipcv1.IPStages.Rollback:
@@ -593,7 +589,6 @@ func IsIPStageInProgress(ipc *ipcv1.IPConfig, stage ipcv1.IPConfigStage) bool {
 func GetIPInProgressStage(ipc *ipcv1.IPConfig) ipcv1.IPConfigStage {
 	stages := []ipcv1.IPConfigStage{
 		ipcv1.IPStages.Idle,
-		ipcv1.IPStages.Prep,
 		ipcv1.IPStages.Config,
 		ipcv1.IPStages.Rollback,
 	}
@@ -631,47 +626,7 @@ func SetIPStatusInvalidTransition(ipc *ipcv1.IPConfig, msg string) {
 	)
 }
 
-// SetIPPrepStatusInProgress updates the IP Prep status to in progress with message
-func SetIPPrepStatusInProgress(ipc *ipcv1.IPConfig, msg string) {
-	SetStatusCondition(&ipc.Status.Conditions,
-		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
-		ConditionReasons.InProgress,
-		metav1.ConditionTrue,
-		msg,
-		ipc.Generation)
-}
-
-// SetIPPrepStatusFailed updates the IP Prep status to failed with message
-func SetIPPrepStatusFailed(ipc *ipcv1.IPConfig, msg string) {
-	SetStatusCondition(&ipc.Status.Conditions,
-		GetIPCompletedConditionType(ipcv1.IPStages.Prep),
-		ConditionReasons.Failed,
-		metav1.ConditionFalse,
-		msg,
-		ipc.Generation)
-	SetStatusCondition(&ipc.Status.Conditions,
-		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
-		ConditionReasons.Failed,
-		metav1.ConditionFalse,
-		msg,
-		ipc.Generation)
-}
-
-// SetIPPrepStatusCompleted updates the IP Prep status to completed
-func SetIPPrepStatusCompleted(ipc *ipcv1.IPConfig, msg string) {
-	SetStatusCondition(&ipc.Status.Conditions,
-		GetIPInProgressConditionType(ipcv1.IPStages.Prep),
-		ConditionReasons.Completed,
-		metav1.ConditionFalse,
-		msg,
-		ipc.Generation)
-	SetStatusCondition(&ipc.Status.Conditions,
-		GetIPCompletedConditionType(ipcv1.IPStages.Prep),
-		ConditionReasons.Completed,
-		metav1.ConditionTrue,
-		msg,
-		ipc.Generation)
-}
+// Removed Prep-stage status helpers as Prep stage no longer exists for IPConfig
 
 // SetIPConfigStatusInProgress updates the IP Config status to in progress with message
 func SetIPConfigStatusInProgress(ipc *ipcv1.IPConfig, msg string) {

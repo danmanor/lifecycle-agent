@@ -453,7 +453,7 @@ func TestResetIPHistory(t *testing.T) {
 				ipc: &ipcv1.IPConfig{
 					Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Idle},
 					Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{
-						{Stage: ipcv1.IPStages.Prep},
+						{Stage: ipcv1.IPStages.Config},
 					}},
 				},
 			},
@@ -466,16 +466,16 @@ func TestResetIPHistory(t *testing.T) {
 			name: "no change in history if IP stage other than Idle is desired",
 			args: args{
 				ipc: &ipcv1.IPConfig{
-					Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep},
+					Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config},
 					Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{
-						{Stage: ipcv1.IPStages.Prep},
+						{Stage: ipcv1.IPStages.Config},
 					}},
 				},
 			},
 			expectation: &ipcv1.IPConfig{
-				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep},
+				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config},
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{
-					{Stage: ipcv1.IPStages.Prep},
+					{Stage: ipcv1.IPStages.Config},
 				}},
 			},
 		},
@@ -507,16 +507,16 @@ func TestStartIPStageHistory(t *testing.T) {
 	}{
 		{
 			name: "Start IP stage when not Idle",
-			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}},
+			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}},
 			expectation: &ipcv1.IPConfig{
-				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Prep, StartTime: currentTime}}},
+				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Config, StartTime: currentTime}}},
 			},
 		},
 		{
 			name: "IP stage already started and called again during requeue",
-			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}, Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Prep, StartTime: currentTime}}}}},
+			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}, Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Config, StartTime: currentTime}}}}},
 			expectation: &ipcv1.IPConfig{
-				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Prep, StartTime: currentTime}}},
+				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Config, StartTime: currentTime}}},
 			},
 		},
 	}
@@ -548,23 +548,23 @@ func TestStartIPPhase(t *testing.T) {
 	}{
 		{
 			name:        "Start an IP phase before initializing stage history",
-			args:        args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}, phase: "TEST-PHASE"},
-			expectation: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}},
+			args:        args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}, phase: "TEST-PHASE"},
+			expectation: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}},
 		},
 		{
 			name: "Start an IP phase after initializing stage",
 			args: args{
 				ipc: func() *ipcv1.IPConfig {
-					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}
+					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}
 					StartIPStageHistory(client, log, cur)
 					return cur
 				}(),
 				phase: "TEST-PHASE",
 			},
 			expectation: &ipcv1.IPConfig{
-				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep},
+				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config},
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{
-					Stage:     ipcv1.IPStages.Prep,
+					Stage:     ipcv1.IPStages.Config,
 					StartTime: currentTime,
 					Phases:    []*ipcv1.IPPhase{{Phase: "TEST-PHASE", StartTime: currentTime}},
 				}}},
@@ -574,7 +574,7 @@ func TestStartIPPhase(t *testing.T) {
 			name: "IP phase already started but called again during requeue",
 			args: args{
 				ipc: func() *ipcv1.IPConfig {
-					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}
+					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}
 					StartIPStageHistory(client, log, cur)
 					StartIPPhase(client, log, cur, "TEST-PHASE")
 					return cur
@@ -583,7 +583,7 @@ func TestStartIPPhase(t *testing.T) {
 			},
 			expectation: &ipcv1.IPConfig{
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{
-					Stage:     ipcv1.IPStages.Prep,
+					Stage:     ipcv1.IPStages.Config,
 					StartTime: currentTime,
 					Phases:    []*ipcv1.IPPhase{{Phase: "TEST-PHASE", StartTime: currentTime}},
 				}}},
@@ -620,7 +620,7 @@ func TestStopIPPhase(t *testing.T) {
 			name: "Stop an IP phase of a stage",
 			args: args{
 				ipc: func() *ipcv1.IPConfig {
-					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}
+					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}
 					StartIPStageHistory(client, log, cur)
 					StartIPPhase(client, log, cur, "TEST-PHASE")
 					return cur
@@ -628,9 +628,9 @@ func TestStopIPPhase(t *testing.T) {
 				phase: "TEST-PHASE",
 			},
 			expectation: &ipcv1.IPConfig{
-				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep},
+				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config},
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{
-					Stage:     ipcv1.IPStages.Prep,
+					Stage:     ipcv1.IPStages.Config,
 					StartTime: currentTime,
 					Phases: []*ipcv1.IPPhase{{
 						Phase:          "TEST-PHASE",
@@ -644,16 +644,16 @@ func TestStopIPPhase(t *testing.T) {
 			name: "Stop an IP phase that doesn't exist",
 			args: args{
 				ipc: func() *ipcv1.IPConfig {
-					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}
+					cur := &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}
 					StartIPStageHistory(client, log, cur)
 					return cur
 				}(),
 				phase: "TEST-PHASE",
 			},
 			expectation: &ipcv1.IPConfig{
-				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep},
+				Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config},
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{
-					Stage:     ipcv1.IPStages.Prep,
+					Stage:     ipcv1.IPStages.Config,
 					StartTime: currentTime,
 				}}},
 			},
@@ -686,10 +686,10 @@ func TestStopIPStageHistory(t *testing.T) {
 	}{
 		{
 			name: "Stop a known IP stage timer with completionTime",
-			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}, Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Prep, StartTime: currentTime}}}}},
+			args: args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}, Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{Stage: ipcv1.IPStages.Config, StartTime: currentTime}}}}},
 			expectation: &ipcv1.IPConfig{
 				Status: ipcv1.IPConfigStatus{History: []*ipcv1.IPHistory{{
-					Stage:          ipcv1.IPStages.Prep,
+					Stage:          ipcv1.IPStages.Config,
 					StartTime:      currentTime,
 					CompletionTime: currentTime,
 				}}},
@@ -697,7 +697,7 @@ func TestStopIPStageHistory(t *testing.T) {
 		},
 		{
 			name:        "Stop IP stage timer that doesn't exist",
-			args:        args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Prep}}},
+			args:        args{ipc: &ipcv1.IPConfig{Spec: ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Config}}},
 			expectation: &ipcv1.IPConfig{Status: ipcv1.IPConfigStatus{}},
 		},
 	}

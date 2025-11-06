@@ -48,20 +48,20 @@ func ReadIPConfigStatus(filePath string, fops FileOpsReader) (IPConfigRunStatusP
 	data, err := fops.ReadFile(filePath)
 	if err != nil {
 		if fops.IsNotExist(err) {
-			return IPConfigRunPhaseUnknown, "", nil
+			return IPConfigPhaseUnknown, "", nil
 		}
-		return IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)
+		return IPConfigPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)
 	}
 
 	var st IPConfigRunStatus
 	if err := json.Unmarshal(data, &st); err != nil {
-		return IPConfigRunPhaseUnknown, "", fmt.Errorf("failed to parse status file %s: %w", filePath, err)
+		return IPConfigPhaseUnknown, "", fmt.Errorf("failed to parse status file %s: %w", filePath, err)
 	}
 
 	switch st.Phase {
-	case IPConfigRunPhaseRunning, IPConfigRunPhaseSucceeded, IPConfigRunPhaseFailed:
+	case IPConfigPhaseRunning, IPConfigPhaseSucceeded, IPConfigPhaseFailed:
 		return st.Phase, st.Message, nil
 	default:
-		return IPConfigRunPhaseUnknown, st.Message, nil
+		return IPConfigPhaseUnknown, st.Message, nil
 	}
 }

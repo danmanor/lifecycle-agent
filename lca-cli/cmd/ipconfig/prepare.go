@@ -93,7 +93,7 @@ func runIPConfigPrepare() error {
 
 	preparer := ipconfig.NewPrepareHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rbClient, client)
 	if err := common.WriteIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunStatus{
-		Phase:     common.IPConfigRunPhaseRunning,
+		Phase:     common.IPConfigPhaseRunning,
 		Message:   "ip-config prepare started",
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -103,7 +103,7 @@ func runIPConfigPrepare() error {
 	if err := preparer.RunPrepare(context.Background(), newIPv4, newIPv6); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigPrepareStatusFile,
-			common.IPConfigRunPhaseFailed,
+			common.IPConfigPhaseFailed,
 			fmt.Sprintf("ip-config prepare failed: %v", err),
 		)
 		if internalErr != nil {
@@ -120,7 +120,7 @@ func runIPConfigPrepare() error {
 	statusFilePath := filepath.Join(staterootPath, common.IPConfigPrepareStatusFile)
 	if err := common.FinalizeIPConfigStatus(
 		statusFilePath,
-		common.IPConfigRunPhaseSucceeded,
+		common.IPConfigPhaseSucceeded,
 		"ip-config prepare completed successfully",
 	); err != nil {
 		return fmt.Errorf("failed to mark prepare as successful: %w", err)
@@ -128,7 +128,7 @@ func runIPConfigPrepare() error {
 
 	if err := common.FinalizeIPConfigStatus(
 		common.IPConfigPrepareStatusFile,
-		common.IPConfigRunPhaseSucceeded,
+		common.IPConfigPhaseSucceeded,
 		"ip-config prepare completed successfully",
 	); err != nil {
 		return fmt.Errorf("failed to mark prepare as successful: %w", err)

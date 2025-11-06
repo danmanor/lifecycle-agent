@@ -22,38 +22,26 @@ const (
 	IPConfigRollbackPhasePostpivot string = "RollbackPostPivot"
 )
 
-type IPConfigRollbackStageHandler struct {
-	Client                  client.Client
-	ChrootOps               ops.Ops
-	TwoPhaseRollbackHandler IPConfigTwoPhaseStageHandler
+//go:generate mockgen -source=ipc_rollback_handlers.go -package=controllers -destination=ipc_rollback_handlers_mock.go
+type IPConfigRollbackPhasesHandlerInterface interface {
+	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
+	PostPivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 }
 
-func NewIPConfigRollbackStageHandler(
-	client client.Client,
-	chrootOps ops.Ops,
-	twoPhaseHandler IPConfigTwoPhaseStageHandler,
-) IPConfigStageHandler {
-	return &IPConfigRollbackStageHandler{
-		Client:                  client,
-		ChrootOps:               chrootOps,
-		TwoPhaseRollbackHandler: twoPhaseHandler,
-	}
-}
-
-type IPConfigTwoPhaseRollbackHandler struct {
+type IPConfigRollbackPhasesHandler struct {
 	Client          client.Client
 	NoncachedClient client.Reader
 	RPMOstreeClient rpmostreeclient.IClient
 	Ops             ops.Ops
 }
 
-func NewIPConfigTwoPhaseRollbackHandler(
+func NewIPConfigRollbackPhasesHandler(
 	client client.Client,
 	noncachedClient client.Reader,
 	rpmostreeClient rpmostreeclient.IClient,
 	ops ops.Ops,
-) IPConfigTwoPhaseStageHandler {
-	return &IPConfigTwoPhaseRollbackHandler{
+) IPConfigRollbackPhasesHandlerInterface {
+	return &IPConfigRollbackPhasesHandler{
 		Client:          client,
 		NoncachedClient: noncachedClient,
 		RPMOstreeClient: rpmostreeClient,
@@ -61,7 +49,68 @@ func NewIPConfigTwoPhaseRollbackHandler(
 	}
 }
 
-func (r *IPConfigTwoPhaseRollbackHandler) PrePivot(
+type IPConfigRollbackStageHandler struct {
+	Client        client.Client
+	ChrootOps     ops.Ops
+	PhasesHandler IPConfigRollbackPhasesHandlerInterface
+}
+
+func NewIPConfigRollbackStageHandler(
+	client client.Client,
+	chrootOps ops.Ops,
+	phasesHandler IPConfigRollbackPhasesHandlerInterface,
+) IPConfigStageHandler {
+	return &IPConfigRollbackStageHandler{
+		Client:        client,
+		ChrootOps:     chrootOps,
+		PhasesHandler: phasesHandler,
+	}
+}
+
+// Handle executes the Rollback stage state machine
+func (h *IPConfigRollbackStageHandler) Handle(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithName("IPConfigRollback")
+	logger.Info("Starting handleRollback")
+
+	if isIPTransitionRequested(ipc) {
+		if err := validateIPConfigStage(ipc); err != nil {
+			controllerutils.SetIPRollbackStatusFailed(
+				ipc,
+				"invalid transition: "+string(ipc.Spec.Stage),
+			)
+			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+			}
+			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
+		}
+	}
+
+	phase, message, err := common.ReadIPConfigStatus(
+		common.PathOutsideChroot(common.IPConfigRollbackStatusFile),
+		h.ChrootOps,
+	)
+	if err != nil {
+		return requeueWithError(fmt.Errorf("failed to read ip-config rollback status: %w", err))
+	}
+
+	switch phase {
+	case common.IPConfigPhaseUnknown:
+		return h.handleRollbackUnknown(ctx, ipc, logger)
+	case common.IPConfigPhaseRunning:
+		return h.handleRollbackRunning(logger)
+	case common.IPConfigPhaseFailed:
+		return h.handleRollbackFailed(ctx, ipc, logger, message)
+	case common.IPConfigPhaseSucceeded:
+		return h.handleRollbackSucceeded(ctx, ipc, logger)
+	default:
+		return requeueWithShortInterval(), nil
+	}
+}
+
+func (r *IPConfigRollbackPhasesHandler) PrePivot(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
@@ -141,26 +190,7 @@ func (r *IPConfigTwoPhaseRollbackHandler) PrePivot(
 	return doNotRequeue(), nil
 }
 
-func (r *IPConfigTwoPhaseRollbackHandler) scheduleIPConfigRollback(
-	logger logr.Logger,
-	stateroot string,
-) error {
-	logger.Info("Scheduling lca-cli ip-config rollback via systemd-run", "stateroot", stateroot)
-	args := []string{
-		"--property", controllerutils.SystemdExitTypeCgroup,
-		"--unit", controllerutils.IPConfigRollbackUnit,
-		"--description", controllerutils.IPConfigRollbackDescription,
-		controllerutils.LcaCliBinaryName, "ip-config", "rollback",
-		"--stateroot", stateroot,
-	}
-	if _, err := r.Ops.RunSystemdAction(args...); err != nil {
-		return fmt.Errorf("failed to schedule ip-config rollback: %w", err)
-	}
-
-	return nil
-}
-
-func (r *IPConfigTwoPhaseRollbackHandler) PostPivot(
+func (r *IPConfigRollbackPhasesHandler) PostPivot(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
@@ -189,47 +219,23 @@ func (r *IPConfigTwoPhaseRollbackHandler) PostPivot(
 	return doNotRequeue(), nil
 }
 
-// Handle executes the Rollback stage state machine
-func (h *IPConfigRollbackStageHandler) Handle(
-	ctx context.Context,
-	ipc *ipcv1.IPConfig,
-) (ctrl.Result, error) {
-	logger := log.FromContext(ctx).WithName("IPConfigRollback")
-	logger.Info("Starting handleRollback")
-
-	if isIPTransitionRequested(ipc) {
-		if err := validateIPConfigStage(ipc); err != nil {
-			controllerutils.SetIPRollbackStatusFailed(
-				ipc,
-				"invalid transition: "+string(ipc.Spec.Stage),
-			)
-			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
-				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-			}
-			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
-		}
+func (r *IPConfigRollbackPhasesHandler) scheduleIPConfigRollback(
+	logger logr.Logger,
+	stateroot string,
+) error {
+	logger.Info("Scheduling lca-cli ip-config rollback via systemd-run", "stateroot", stateroot)
+	args := []string{
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", controllerutils.IPConfigRollbackUnit,
+		"--description", controllerutils.IPConfigRollbackDescription,
+		controllerutils.LcaCliBinaryName, "ip-config", "rollback",
+		"--stateroot", stateroot,
+	}
+	if _, err := r.Ops.RunSystemdAction(args...); err != nil {
+		return fmt.Errorf("failed to schedule ip-config rollback: %w", err)
 	}
 
-	phase, message, err := common.ReadIPConfigStatus(
-		common.PathOutsideChroot(common.IPConfigRollbackStatusFile),
-		h.ChrootOps,
-	)
-	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to read ip-config rollback status: %w", err))
-	}
-
-	switch phase {
-	case common.IPConfigRunPhaseUnknown:
-		return h.handleRollbackUnknown(ctx, ipc, logger)
-	case common.IPConfigRunPhaseRunning:
-		return h.handleRollbackRunning(logger)
-	case common.IPConfigRunPhaseFailed:
-		return h.handleRollbackFailed(ctx, ipc, logger, message)
-	case common.IPConfigRunPhaseSucceeded:
-		return h.handleRollbackSucceeded(ctx, ipc, logger)
-	default:
-		return requeueWithShortInterval(), nil
-	}
+	return nil
 }
 
 func (h *IPConfigRollbackStageHandler) handleRollbackUnknown(
@@ -246,7 +252,7 @@ func (h *IPConfigRollbackStageHandler) handleRollbackUnknown(
 	}
 
 	logger.Info("Running IP config Rollback PrePivot handler")
-	result, err := h.TwoPhaseRollbackHandler.PrePivot(ctx, ipc, logger)
+	result, err := h.PhasesHandler.PrePivot(ctx, ipc, logger)
 	if err != nil {
 		return result, fmt.Errorf("failed to run rollback pre pivot: %w", err)
 	}
@@ -281,7 +287,7 @@ func (h *IPConfigRollbackStageHandler) handleRollbackSucceeded(
 	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigRollbackPhasePrepivot)
 
 	logger.Info("Running PostPivot handler")
-	result, err := h.TwoPhaseRollbackHandler.PostPivot(ctx, ipc, logger)
+	result, err := h.PhasesHandler.PostPivot(ctx, ipc, logger)
 	if err != nil {
 		return result, fmt.Errorf("failed to run rollback post pivot: %w", err)
 	}

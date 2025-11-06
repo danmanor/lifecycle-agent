@@ -69,7 +69,7 @@ func runIPConfigRollback() error {
 	rb := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
 	if err := common.WriteIPConfigStatus(common.IPConfigRollbackStatusFile, common.IPConfigRunStatus{
-		Phase:     common.IPConfigRunPhaseRunning,
+		Phase:     common.IPConfigPhaseRunning,
 		Message:   "ip-config rollback started",
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -80,7 +80,7 @@ func runIPConfigRollback() error {
 	if err := exec.RunRollback(rollbackStateroot); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRollbackStatusFile,
-			common.IPConfigRunPhaseFailed,
+			common.IPConfigPhaseFailed,
 			fmt.Sprintf("ip-config rollback failed: %v", err),
 		)
 		if internalErr != nil {
@@ -99,7 +99,7 @@ func runIPConfigRollback() error {
 
 	if err := common.FinalizeIPConfigStatus(
 		statusFilePath,
-		common.IPConfigRunPhaseSucceeded,
+		common.IPConfigPhaseSucceeded,
 		"ip-config rollback completed successfully",
 	); err != nil {
 		return fmt.Errorf("failed to mark rollback as successful: %w", err)

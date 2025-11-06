@@ -14,56 +14,73 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
+	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	IPConfigConfigPhasePrepivot  = "ConfigPrePivot"
-	IPConfigConfigPhasePostpivot = "ConfigPostPivot"
+	IPConfigPhasePrePivot          = "pre-pivot"
+	IPConfigPhasePreConfiguration  = "pre-configuration"
+	IPConfigPhasePostConfiguration = "post-configuration"
 )
 
-type IPConfigConfigStageHandler struct {
-	Client                client.Client
-	ChrootOps             ops.Ops
-	TwoPhaseConfigHandler IPConfigTwoPhaseStageHandler
+//go:generate mockgen -source=ipc_config_handlers.go -package=controllers -destination=ipc_config_handlers_mock.go
+type IPConfigConfigPhasesHandlerInterface interface {
+	PrePivot(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
+	PreConfiguration(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
+	PostConfiguration(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) (ctrl.Result, error)
 }
 
-func NewIPConfigConfigStageHandler(
-	client client.Client,
-	chrootOps ops.Ops,
-	twoPhaseHandler IPConfigTwoPhaseStageHandler,
-) IPConfigStageHandler {
-	return &IPConfigConfigStageHandler{
-		Client:                client,
-		ChrootOps:             chrootOps,
-		TwoPhaseConfigHandler: twoPhaseHandler,
-	}
-}
-
-type IPConfigTwoPhaseConfigurationHandler struct {
+type IPConfigConfigPhasesHandler struct {
 	Client          client.Client
 	NoncachedClient client.Reader
-	Ops             ops.Ops
+	RPMOstreeClient rpmostreeclient.IClient
+	ChrootOps       ops.Ops
 	RebootClient    reboot.RebootIntf
 }
 
-func NewIPConfigTwoPhaseConfigurationHandler(
+func NewIPConfigConfigPhasesHandler(
 	client client.Client,
 	noncachedClient client.Reader,
-	ops ops.Ops,
+	rpmostreeClient rpmostreeclient.IClient,
+	chrootOps ops.Ops,
 	rebootClient reboot.RebootIntf,
-) IPConfigTwoPhaseStageHandler {
-	return &IPConfigTwoPhaseConfigurationHandler{
+) IPConfigConfigPhasesHandlerInterface {
+	return &IPConfigConfigPhasesHandler{
 		Client:          client,
 		NoncachedClient: noncachedClient,
-		Ops:             ops,
+		RPMOstreeClient: rpmostreeClient,
+		ChrootOps:       chrootOps,
 		RebootClient:    rebootClient,
 	}
 }
 
-// Handle executes the Config stage state machine
+type IPConfigConfigStageHandler struct {
+	Client          client.Client
+	NoncachedClient client.Reader
+	RPMOstreeClient rpmostreeclient.IClient
+	ChrootOps       ops.Ops
+	PhasesHandler   IPConfigConfigPhasesHandlerInterface
+}
+
+func NewIPConfigConfigStageHandler(
+	client client.Client,
+	noncachedClient client.Reader,
+	rpmOstreeClient rpmostreeclient.IClient,
+	chrootOps ops.Ops,
+	phasesHandler IPConfigConfigPhasesHandlerInterface,
+) IPConfigStageHandler {
+	return &IPConfigConfigStageHandler{
+		Client:          client,
+		NoncachedClient: noncachedClient,
+		RPMOstreeClient: rpmOstreeClient,
+		ChrootOps:       chrootOps,
+		PhasesHandler:   phasesHandler,
+	}
+}
+
 func (h *IPConfigConfigStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("IPConfigConfig")
 	logger.Info("Starting handleConfig")
@@ -81,29 +98,116 @@ func (h *IPConfigConfigStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPCo
 		}
 	}
 
-	phase, message, err := common.ReadIPConfigStatus(
-		common.PathOutsideChroot(common.IPConfigRunStatusFile),
+	status, message, err := common.ReadIPConfigStatus(
+		common.PathOutsideChroot(common.IPConfigPrepareStatusFile),
 		h.ChrootOps,
 	)
 	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to read ip-config run status: %w", err))
+		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to read ip-config prepare status: %s", err.Error()))
+		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		return requeueWithError(fmt.Errorf("failed to read ip-config prepare status: %w", err))
 	}
 
-	switch phase {
-	case common.IPConfigRunPhaseUnknown:
-		return h.handleConfigUnknown(ctx, ipc, logger)
-	case common.IPConfigRunPhaseRunning:
-		return h.handleConfigRunning(ctx, ipc)
-	case common.IPConfigRunPhaseFailed:
-		return h.handleConfigFailed(ctx, ipc, logger, message)
-	case common.IPConfigRunPhaseSucceeded:
-		return h.handleConfigSucceeded(ctx, ipc, logger)
+	switch status {
+	case common.IPConfigPhaseUnknown:
+		return h.handlePrepareUnknown(ctx, ipc, logger)
+	case common.IPConfigPhaseRunning:
+		return h.handlePrepareRunning()
+	case common.IPConfigPhaseFailed:
+		return h.handlePrepareFailed(ctx, ipc, logger, message)
+	case common.IPConfigPhaseSucceeded:
+		return h.handlePrepareSucceeded(ctx, ipc, logger)
 	default:
 		return requeueWithShortInterval(), nil
 	}
 }
 
-func (h *IPConfigConfigStageHandler) handleConfigUnknown(
+func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	controllerutils.SetIPConfigStatusInProgress(ipc, "Configuration preparation is in progress")
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	result, err := h.PhasesHandler.PrePivot(ctx, ipc, logger)
+	if err != nil {
+		return result, fmt.Errorf("pre-pivot phase failed: %w", err)
+	}
+
+	return result, nil
+}
+
+func (h *IPConfigConfigStageHandler) handlePrepareRunning() (ctrl.Result, error) {
+	return requeueWithShortInterval(), nil
+}
+
+func (h *IPConfigConfigStageHandler) handlePrepareFailed(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+	message string,
+) (ctrl.Result, error) {
+	controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("Configuration preparation failed: %s", message))
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	logger.Error(
+		fmt.Errorf("failed to run configuration preparation: %s", message),
+		"failed to run configuration preparation",
+	)
+
+	return doNotRequeue(), nil
+}
+
+func (h *IPConfigConfigStageHandler) handlePrepareSucceeded(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigPhasePrePivot)
+	logger.Info("Finished pre-pivot phase successfully")
+
+	if !isTargetStaterootBooted(ipc, h.RPMOstreeClient) {
+		controllerutils.SetIPConfigStatusFailed(ipc, "host didn't reboot into new stateroot")
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return doNotRequeue(), nil
+	}
+
+	runPhase, runMessage, err := common.ReadIPConfigStatus(
+		common.PathOutsideChroot(common.IPConfigRunStatusFile),
+		h.ChrootOps,
+	)
+	if err != nil {
+		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to read ip-config run status: %s", err.Error()))
+		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		return requeueWithError(fmt.Errorf("failed to read ip-config run status: %w", err))
+	}
+
+	switch runPhase {
+	case common.IPConfigPhaseUnknown:
+		return h.handleRunUnknown(ctx, ipc, logger)
+	case common.IPConfigPhaseRunning:
+		return h.handleRunRunning()
+	case common.IPConfigPhaseFailed:
+		return h.handleRunFailed(ctx, ipc, logger, runMessage)
+	case common.IPConfigPhaseSucceeded:
+		return h.handleRunSucceeded(ctx, ipc, logger)
+	default:
+		return requeueWithShortInterval(), nil
+	}
+}
+
+func (h *IPConfigConfigStageHandler) handleRunUnknown(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
@@ -113,24 +217,19 @@ func (h *IPConfigConfigStageHandler) handleConfigUnknown(
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	logger.Info("Running IP config PrePivot handler")
-	result, err := h.TwoPhaseConfigHandler.PrePivot(ctx, ipc, logger)
+	result, err := h.PhasesHandler.PreConfiguration(ctx, ipc, logger)
 	if err != nil {
-		return result, fmt.Errorf("failed to run PrePivot: %w", err)
+		return result, fmt.Errorf("failed to run pre configuration: %w", err)
 	}
+
 	return result, nil
 }
 
-func (h *IPConfigConfigStageHandler) handleConfigRunning(
-	ctx context.Context, ipc *ipcv1.IPConfig) (ctrl.Result, error) {
-	controllerutils.SetIPConfigStatusInProgress(ipc, "ip-config run in progress")
-	if err := h.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
+func (h *IPConfigConfigStageHandler) handleRunRunning() (ctrl.Result, error) {
 	return requeueWithShortInterval(), nil
 }
 
-func (h *IPConfigConfigStageHandler) handleConfigFailed(
+func (h *IPConfigConfigStageHandler) handleRunFailed(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
@@ -141,93 +240,153 @@ func (h *IPConfigConfigStageHandler) handleConfigFailed(
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
-	logger.Error(fmt.Errorf("ip-config run failed: %s", message), "ip-config run failed")
+	logger.Error(
+		fmt.Errorf("failed to run ip-config: %s", message),
+		"failed to run ip-config",
+	)
+
 	return doNotRequeue(), nil
 }
 
-func (h *IPConfigConfigStageHandler) handleConfigSucceeded(
+func (h *IPConfigConfigStageHandler) handleRunSucceeded(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigConfigPhasePrepivot)
+	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigPhasePreConfiguration)
+	logger.Info("Finished pre-configuration phase successfully, running post configuration")
 
-	logger.Info("Running IP config PostPivot handler")
-	result, err := h.TwoPhaseConfigHandler.PostPivot(ctx, ipc, logger)
+	result, err := h.PhasesHandler.PostConfiguration(ctx, ipc, logger)
 	if err != nil {
-		return result, fmt.Errorf("post pivot failed: %w", err)
+		return result, fmt.Errorf("failed to run post configuration: %w", err)
 	}
 
-	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed")
-	if err := h.Client.Status().Update(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-	}
-	controllerutils.StopIPStageHistory(h.Client, logger, ipc)
+	logger.Info("Configuration completed successfully")
 
-	logger.Info("config completed successfully")
 	return result, nil
 }
 
-func (c *IPConfigTwoPhaseConfigurationHandler) PrePivot(
+func (c *IPConfigConfigPhasesHandler) PrePivot(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePrepivot)
+	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigPhasePrePivot)
+	logger.Info("Starting pre-pivot phase")
 
-	if err := c.writeIPConfigRunConfig(ipc); err != nil {
+	if err := CheckHealth(ctx, c.NoncachedClient, logger.WithName("HealthCheck")); err != nil {
+		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
+		controllerutils.SetIPConfigStatusInProgress(ipc, msg)
+		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		return requeueWithHealthCheckInterval(), nil
+	}
+
+	ipv4Addr, ipv6Addr := getIPAddresses(ipc)
+	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
+		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()))
+		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
+	}
+
+	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr); err != nil {
+		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config prepare: %s", err.Error()))
+		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		logger.Error(fmt.Errorf("failed to schedule ip-config prepare: %w", err), "failed to schedule ip-config prepare")
+		return doNotRequeue(), nil
+	}
+
+	// We shouldn't reach here on successful ip-config prepare
+
+	return requeueWithShortInterval(), nil
+}
+
+func (h *IPConfigConfigPhasesHandler) PreConfiguration(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	controllerutils.StartIPPhase(h.Client, logger, ipc, IPConfigPhasePreConfiguration)
+	logger.Info("Starting pre-configuration phase")
+
+	if err := CheckHealth(ctx, h.NoncachedClient, logger); err != nil {
+		controllerutils.SetIPConfigStatusInProgress(
+			ipc,
+			fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()),
+		)
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithHealthCheckInterval(), nil
+	}
+
+	if err := h.startIPConfigInitMonitor(ipc, logger); err != nil {
+		controllerutils.SetIPConfigStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to start ip-config init monitor: %s", err.Error()),
+		)
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithError(fmt.Errorf("failed to start ip-config init monitor: %w", err))
+	}
+
+	if err := h.writeIPConfigRunConfig(ipc); err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
 			fmt.Sprintf("failed to write ip-config run config: %s", err.Error()),
 		)
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
 		return requeueWithError(fmt.Errorf("failed to write ip-config run config: %w", err))
 	}
 
-	if err := c.RunLcaCliIPConfigRun(logger); err != nil {
+	if err := h.RunLcaCliIPConfigRun(logger); err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
 			fmt.Sprintf("failed to run ip-config: %s", err.Error()),
 		)
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		logger.Error(fmt.Errorf("failed to schedule ip-config run: %w", err), "failed to schedule ip-config run")
-		return doNotRequeue(), nil
+		return requeueWithError(fmt.Errorf("failed to run ip-config run command: %w", err))
 	}
 
-	// should not reach here on successful ip-config run
+	// We shouldn't reach here on successful ip-config run
 
 	return doNotRequeue(), nil
 }
 
-// PreConfigure and PostConfigure were merged into PrePivot
-
-func (c *IPConfigTwoPhaseConfigurationHandler) PostPivot(
+func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 	ctx context.Context,
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
-	controllerutils.StartIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePostpivot)
-	logger.Info("Starting health check for different components")
-	if err := CheckHealth(ctx, c.NoncachedClient, logger); err != nil {
+	controllerutils.StartIPPhase(h.Client, logger, ipc, IPConfigPhasePostConfiguration)
+	logger.Info("Starting post-configuration phase")
+
+	if err := CheckHealth(ctx, h.NoncachedClient, logger); err != nil {
 		controllerutils.SetIPConfigStatusInProgress(
 			ipc,
 			fmt.Sprintf("Waiting for system to stabilize: %s", err.Error()),
 		)
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
-		return requeueWithHealthCheckInterval(), fmt.Errorf("waiting for system to stabilize: %s", err.Error())
+		return requeueWithHealthCheckInterval(), nil
 	}
 
 	controllerutils.SetIPConfigStatusInProgress(ipc, "Cluster has stabilized")
-	if err := c.Client.Status().Update(ctx, ipc); err != nil {
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 	}
 
@@ -236,26 +395,28 @@ func (c *IPConfigTwoPhaseConfigurationHandler) PostPivot(
 			ipc,
 			fmt.Sprintf("Waiting for current IPs to match spec: %s", err.Error()),
 		)
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	if err := c.RebootClient.DisableInitMonitor(); err != nil {
+	if err := h.RebootClient.DisableInitMonitor(); err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
 			fmt.Sprintf("failed to disable init monitor: %s", err.Error()),
 		)
-		if err := c.Client.Status().Update(ctx, ipc); err != nil {
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 
 		return requeueWithError(fmt.Errorf("failed to disable init monitor: %w", err))
 	}
 
-	controllerutils.StopIPPhase(c.Client, logger, ipc, IPConfigConfigPhasePostpivot)
+	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigPhasePostConfiguration)
+	controllerutils.StopIPStageHistory(h.Client, logger, ipc)
+	logger.Info("Finished post-configuration phase successfully")
 
 	return doNotRequeue(), nil
 }
@@ -425,7 +586,7 @@ func parseCIDR(c string) (string, int, error) {
 // Reconciler-specific config handlers migrated to IPConfigConfigStageHandler
 
 // writeIPConfigRunConfigToNewStateroot writes the ip-config run configuration file into the new stateroot etc
-func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig) error {
+func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig) error {
 	cfg := common.IPConfigRunConfig{}
 
 	if v := ipc.Spec.IPv4; v != nil {
@@ -479,7 +640,7 @@ func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1
 	if err != nil {
 		return fmt.Errorf("failed to marshal ip-config run config: %w", err)
 	}
-	if err := c.Ops.WriteFile(common.PathOutsideChroot(common.IPConfigRunFlagsFile), data, 0o600); err != nil {
+	if err := c.ChrootOps.WriteFile(common.PathOutsideChroot(common.IPConfigRunFlagsFile), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write ip-config run config: %w", err)
 	}
 
@@ -487,7 +648,7 @@ func (c *IPConfigTwoPhaseConfigurationHandler) writeIPConfigRunConfig(ipc *ipcv1
 }
 
 // RunLcaCliIPConfigRun schedules an lca-cli ip-config run via systemd-run.
-func (c *IPConfigTwoPhaseConfigurationHandler) RunLcaCliIPConfigRun(
+func (c *IPConfigConfigPhasesHandler) RunLcaCliIPConfigRun(
 	logger logr.Logger,
 ) error {
 	logger.Info("Scheduling lca-cli ip-config run via systemd-run")
@@ -499,9 +660,85 @@ func (c *IPConfigTwoPhaseConfigurationHandler) RunLcaCliIPConfigRun(
 		controllerutils.LcaCliBinaryName, "ip-config", "run",
 	}
 
-	if _, err := c.Ops.RunSystemdAction(args...); err != nil {
+	if _, err := c.ChrootOps.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config run: %w", err)
 	}
 
+	return nil
+}
+
+// Helpers migrated from prep stage for unified Config flow
+
+func getIPAddresses(ipc *ipcv1.IPConfig) (string, string) {
+	ipv4Addr := ""
+	if ipc.Spec.IPv4 != nil && ipc.Spec.IPv4.Address != "" {
+		ipv4Addr = strings.Split(ipc.Spec.IPv4.Address, "/")[0]
+	}
+	ipv6Addr := ""
+	if ipc.Spec.IPv6 != nil && ipc.Spec.IPv6.Address != "" {
+		ipv6Addr = strings.Split(ipc.Spec.IPv6.Address, "/")[0]
+	}
+	return ipv4Addr, ipv6Addr
+}
+
+func runLcaCliIPConfigPrepare(
+	chrootOps ops.Ops,
+	logger logr.Logger,
+	ipv4Addr string,
+	ipv6Addr string,
+) error {
+	logger.Info("Scheduling lca-cli ip-config prepare via systemd-run")
+
+	args := []string{
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", controllerutils.IPConfigPrepareUnit,
+		"--description", controllerutils.IPConfigPrepareDescription,
+		controllerutils.LcaCliBinaryName, "ip-config", "prepare",
+	}
+
+	if ipv4Addr != "" {
+		args = append(args, "--ipv4-address", ipv4Addr)
+	}
+	if ipv6Addr != "" {
+		args = append(args, "--ipv6-address", ipv6Addr)
+	}
+
+	if _, err := chrootOps.RunSystemdAction(args...); err != nil {
+		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
+	}
+	return nil
+}
+
+// startIPConfigInitMonitor writes the auto-rollback config and starts the init-monitor unit post-pivot
+func (c *IPConfigConfigPhasesHandler) startIPConfigInitMonitor(
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+) error {
+	initMonitorDisabled := false
+	if val, exists := ipc.GetAnnotations()[common.AutoRollbackOnFailureInitMonitorAnnotation]; exists {
+		if val == common.AutoRollbackDisableValue {
+			initMonitorDisabled = true
+		}
+	}
+
+	if initMonitorDisabled {
+		logger.Info("IPConfig init monitor disabled via annotation; not starting monitor")
+		return nil
+	}
+
+	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc); err != nil {
+		return fmt.Errorf("failed to write IPConfig auto-rollback config: %w", err)
+	}
+
+	monitorArgs := []string{
+		"--property", controllerutils.SystemdExitTypeCgroup,
+		"--unit", common.IPCInitMonitorUnit,
+		"--description", controllerutils.IPConfigInitMonitorDescription,
+		controllerutils.LcaCliBinaryName, "init-monitor", "--monitor", "--mode", "ipconfig",
+	}
+
+	if _, err := c.ChrootOps.RunSystemdAction(monitorArgs...); err != nil {
+		return fmt.Errorf("failed to start ip-config init monitor: %w", err)
+	}
 	return nil
 }
