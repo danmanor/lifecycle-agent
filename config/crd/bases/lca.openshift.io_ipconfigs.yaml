@@ -29,7 +29,7 @@ spec:
     - jsonPath: .status.conditions[-1:].message
       name: Details
       type: string
-    - jsonPath: .status.clusterNetwork.ipv4.address
+    - jsonPath: .status.network.clusterNetwork.ipv4.address
       name: Current IPv4
       priority: 1
       type: string
@@ -37,7 +37,7 @@ spec:
       name: Desired IPv4
       priority: 1
       type: string
-    - jsonPath: .status.clusterNetwork.ipv6.address
+    - jsonPath: .status.network.clusterNetwork.ipv6.address
       name: Current IPv6
       priority: 1
       type: string
@@ -157,7 +157,6 @@ spec:
                 description: IPConfigStage defines the type for the stage field
                 enum:
                 - Idle
-                - Prep
                 - Config
                 - Rollback
                 type: string
@@ -171,35 +170,6 @@ spec:
           status:
             description: IPConfigStatus defines the observed state of IPConfig
             properties:
-              clusterNetwork:
-                description: ClusterNetwork reflects the node's IPs and their subnets
-                  as seen on the cluster network
-                properties:
-                  ipv4:
-                    description: IPv4 summarizes the current IPv4 on the cluster network
-                    properties:
-                      address:
-                        description: Address is the node internal IP (plain address,
-                          no prefix)
-                        type: string
-                      machineNetwork:
-                        description: MachineNetwork is the matching machine network
-                          CIDR for the IP
-                        type: string
-                    type: object
-                  ipv6:
-                    description: IPv6 summarizes the current IPv6 on the cluster network
-                    properties:
-                      address:
-                        description: Address is the node internal IP (plain address,
-                          no prefix)
-                        type: string
-                      machineNetwork:
-                        description: MachineNetwork is the matching machine network
-                          CIDR for the IP
-                        type: string
-                    type: object
-                type: object
               conditions:
                 items:
                   description: "Condition contains details for one aspect of the current
@@ -311,45 +281,79 @@ spec:
                       type: string
                   type: object
                 type: array
-              hostNetwork:
-                description: HostNetwork reflects the actual network configuration
-                  on the host (br-ex)
+              network:
+                description: Network groups host and cluster network information
                 properties:
-                  ipv4:
-                    description: IPFamilyConfig represents a single stack configuration
+                  clusterNetwork:
+                    description: ClusterNetwork summarizes cluster network using lists
+                      of strings
                     properties:
-                      address:
-                        description: Address is the full address with prefix length
-                          (e.g., 192.0.2.10/24)
-                        type: string
-                      dnsServer:
-                        description: DNSServer is the DNS server IP to use
-                        type: string
-                      gateway:
-                        description: Gateway is the default gateway address
-                        type: string
-                      machineNetwork:
-                        description: MachineNetwork is the CIDR of the machine network
-                          (e.g., 192.0.2.0/24)
-                        type: string
+                      ipv4:
+                        description: IPv4 summarizes the current IPv4 on the cluster
+                          network
+                        properties:
+                          address:
+                            description: Address is the node internal IP (plain address,
+                              no prefix)
+                            type: string
+                          machineNetwork:
+                            description: MachineNetwork is the matching machine network
+                              CIDR for the IP
+                            type: string
+                        type: object
+                      ipv6:
+                        description: IPv6 summarizes the current IPv6 on the cluster
+                          network
+                        properties:
+                          address:
+                            description: Address is the node internal IP (plain address,
+                              no prefix)
+                            type: string
+                          machineNetwork:
+                            description: MachineNetwork is the matching machine network
+                              CIDR for the IP
+                            type: string
+                        type: object
                     type: object
-                  ipv6:
-                    description: IPFamilyConfig represents a single stack configuration
+                  hostNetwork:
+                    description: HostNetwork summarizes current host network
                     properties:
-                      address:
-                        description: Address is the full address with prefix length
-                          (e.g., 192.0.2.10/24)
-                        type: string
-                      dnsServer:
-                        description: DNSServer is the DNS server IP to use
-                        type: string
-                      gateway:
-                        description: Gateway is the default gateway address
-                        type: string
-                      machineNetwork:
-                        description: MachineNetwork is the CIDR of the machine network
-                          (e.g., 192.0.2.0/24)
-                        type: string
+                      ipv4:
+                        description: IPFamilyConfig represents a single stack configuration
+                        properties:
+                          address:
+                            description: Address is the full address with prefix length
+                              (e.g., 192.0.2.10/24)
+                            type: string
+                          dnsServer:
+                            description: DNSServer is the DNS server IP to use
+                            type: string
+                          gateway:
+                            description: Gateway is the default gateway address
+                            type: string
+                          machineNetwork:
+                            description: MachineNetwork is the CIDR of the machine
+                              network (e.g., 192.0.2.0/24)
+                            type: string
+                        type: object
+                      ipv6:
+                        description: IPFamilyConfig represents a single stack configuration
+                        properties:
+                          address:
+                            description: Address is the full address with prefix length
+                              (e.g., 192.0.2.10/24)
+                            type: string
+                          dnsServer:
+                            description: DNSServer is the DNS server IP to use
+                            type: string
+                          gateway:
+                            description: Gateway is the default gateway address
+                            type: string
+                          machineNetwork:
+                            description: MachineNetwork is the CIDR of the machine
+                              network (e.g., 192.0.2.0/24)
+                            type: string
+                        type: object
                     type: object
                 type: object
               observedGeneration:

@@ -364,8 +364,12 @@ func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ipc *ipcv1.IPConfig) e
 		machineCIDRs,
 	)
 
-	ipc.Status.HostNetwork = host
-	ipc.Status.ClusterNetwork = cluster
+	if ipc.Status.Network == nil {
+		ipc.Status.Network = &ipcv1.NetworkStatus{}
+	}
+
+	ipc.Status.Network.HostNetwork = host
+	ipc.Status.Network.ClusterNetwork = cluster
 
 	return nil
 }

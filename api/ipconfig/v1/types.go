@@ -29,9 +29,9 @@ import (
 // +kubebuilder:printcolumn:name="Desired Stage",type="string",JSONPath=".spec.stage"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.conditions[-1:].reason"
 // +kubebuilder:printcolumn:name="Details",type="string",JSONPath=".status.conditions[-1:].message"
-// +kubebuilder:printcolumn:name="Current IPv4",type="string",JSONPath=".status.clusterNetwork.ipv4.address",priority=1
+// +kubebuilder:printcolumn:name="Current IPv4",type="string",JSONPath=".status.network.clusterNetwork.ipv4.address",priority=1
 // +kubebuilder:printcolumn:name="Desired IPv4",type="string",JSONPath=".spec.ipv4.address",priority=1
-// +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.clusterNetwork.ipv6.address",priority=1
+// +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.network.clusterNetwork.ipv6.address",priority=1
 // +kubebuilder:printcolumn:name="Desired IPv6",type="string",JSONPath=".spec.ipv6.address",priority=1
 // +kubebuilder:validation:XValidation:message="ipconfig is a singleton, metadata.name must be 'ipconfig'", rule="self.metadata.name == 'ipconfig'"
 // +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
@@ -179,13 +179,9 @@ type IPConfigStatus struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Valid Next Stage"
 	ValidNextStages []IPConfigStage `json:"validNextStages,omitempty"`
 
-	// HostNetwork reflects the actual network configuration on the host (br-ex)
-	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Host Network"
-	HostNetwork *HostNetworkStatus `json:"hostNetwork,omitempty"`
-
-	// ClusterNetwork reflects the node's IPs and their subnets as seen on the cluster network
-	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Cluster Network"
-	ClusterNetwork *ClusterNetworkStatus `json:"clusterNetwork,omitempty"`
+	// Network groups host and cluster network information
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Network"
+	Network *NetworkStatus `json:"network,omitempty"`
 
 	// History stores timing info of different IPConfig stages and their important phases
 	// +optional
@@ -204,6 +200,14 @@ type ClusterNetworkStatus struct {
 	IPv4 *ClusterIPStatus `json:"ipv4,omitempty"`
 	// IPv6 summarizes the current IPv6 on the cluster network
 	IPv6 *ClusterIPStatus `json:"ipv6,omitempty"`
+}
+
+// NetworkStatus groups host and cluster network views
+type NetworkStatus struct {
+	// HostNetwork summarizes current host network
+	HostNetwork *HostNetworkStatus `json:"hostNetwork,omitempty"`
+	// ClusterNetwork summarizes cluster network using lists of strings
+	ClusterNetwork *ClusterNetworkStatus `json:"clusterNetwork,omitempty"`
 }
 
 // ClusterIPStatus represents a single IP family view on the cluster network

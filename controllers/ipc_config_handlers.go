@@ -430,92 +430,157 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 		return fmt.Errorf("nothing requested, shouldn't happen")
 	}
 
-	if ipc.Status.HostNetwork == nil || ipc.Status.ClusterNetwork == nil {
+	if ipc.Status.Network == nil ||
+		ipc.Status.Network.HostNetwork == nil ||
+		ipc.Status.Network.ClusterNetwork == nil {
 		return fmt.Errorf("host/cluster network not yet populated")
 	}
 
 	// Validate IPv4 if requested
 	if v4 := ipc.Spec.IPv4; v4 != nil {
-		if ipc.Status.HostNetwork.IPv4 == nil {
+		if ipc.Status.Network.HostNetwork.IPv4 == nil {
 			mismatches = append(mismatches, "hostNetwork.ipv4 missing")
 		} else {
 			if err := compareAddressWithPrefix(
 				controllerutils.IPv4FamilyName,
 				v4.Address,
-				ipc.Status.HostNetwork.IPv4.Address,
+				ipc.Status.Network.HostNetwork.IPv4.Address,
 			); err != nil {
-				mismatches = append(mismatches, err.Error())
+				mismatches = append(
+					mismatches, fmt.Sprintf(
+						"ipv4 address mismatch: spec=%s status=%s",
+						v4.Address,
+						ipc.Status.Network.HostNetwork.IPv4.Address,
+					))
 			}
-			if !cidrEqual(v4.MachineNetwork, ipc.Status.HostNetwork.IPv4.MachineNetwork) {
-				mismatches = append(mismatches, fmt.Sprintf("ipv4 machineNetwork mismatch: spec=%s status=%s", v4.MachineNetwork, ipc.Status.HostNetwork.IPv4.MachineNetwork))
+			if !cidrEqual(v4.MachineNetwork, ipc.Status.Network.HostNetwork.IPv4.MachineNetwork) {
+				mismatches = append(
+					mismatches, fmt.Sprintf(
+						"ipv4 machineNetwork mismatch: spec=%s status=%s",
+						v4.MachineNetwork,
+						ipc.Status.Network.HostNetwork.IPv4.MachineNetwork,
+					))
 			}
-			if v4.Gateway != "" && v4.Gateway != ipc.Status.HostNetwork.IPv4.Gateway {
-				mismatches = append(mismatches, fmt.Sprintf("ipv4 gateway mismatch: spec=%s status=%s", v4.Gateway, ipc.Status.HostNetwork.IPv4.Gateway))
+			if v4.Gateway != "" && v4.Gateway != ipc.Status.Network.HostNetwork.IPv4.Gateway {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"ipv4 gateway mismatch: spec=%s status=%s",
+					v4.Gateway,
+					ipc.Status.Network.HostNetwork.IPv4.Gateway,
+				))
 			}
-			if v4.DNSServer != "" && v4.DNSServer != ipc.Status.HostNetwork.IPv4.DNSServer {
-				mismatches = append(mismatches, fmt.Sprintf("ipv4 dns mismatch: spec=%s status=%s", v4.DNSServer, ipc.Status.HostNetwork.IPv4.DNSServer))
+			if v4.DNSServer != "" && v4.DNSServer != ipc.Status.Network.HostNetwork.IPv4.DNSServer {
+				mismatches = append(
+					mismatches,
+					fmt.Sprintf("ipv4 dns mismatch: spec=%s status=%s",
+						v4.DNSServer,
+						ipc.Status.Network.HostNetwork.IPv4.DNSServer,
+					))
 			}
 		}
 
-		wantIP, _, err := splitAddr(v4.Address)
-		if err != nil {
-			mismatches = append(mismatches, fmt.Sprintf("ipv4 spec address invalid: %v", err))
-		} else {
-			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv4 == nil || ipc.Status.ClusterNetwork.IPv4.Address == "" {
-				mismatches = append(mismatches, "cluster ipv4 not observed: ipv4 address missing")
-			} else if !ipEqual(wantIP, ipc.Status.ClusterNetwork.IPv4.Address) {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 not observed: want %s got %s", wantIP, ipc.Status.ClusterNetwork.IPv4.Address))
-			}
+		if ipc.Status.Network.ClusterNetwork == nil ||
+			ipc.Status.Network.ClusterNetwork.IPv4 == nil ||
+			ipc.Status.Network.ClusterNetwork.IPv4.Address == "" {
+			mismatches = append(
+				mismatches,
+				"cluster ipv4 not observed: ipv4 address missing",
+			)
+		} else if !ipEqual(v4.Address, ipc.Status.Network.ClusterNetwork.IPv4.Address) {
+			mismatches = append(
+				mismatches,
+				fmt.Sprintf(
+					"cluster ipv4 not observed: want %s got %s",
+					v4.Address,
+					ipc.Status.Network.ClusterNetwork.IPv4.Address,
+				),
+			)
 		}
 
 		if v4.MachineNetwork != "" {
-			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv4 == nil || ipc.Status.ClusterNetwork.IPv4.MachineNetwork == "" {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s", v4.MachineNetwork))
-			} else if !cidrEqual(v4.MachineNetwork, ipc.Status.ClusterNetwork.IPv4.MachineNetwork) {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s got %s", v4.MachineNetwork, ipc.Status.ClusterNetwork.IPv4.MachineNetwork))
+			if ipc.Status.Network.ClusterNetwork == nil ||
+				ipc.Status.Network.ClusterNetwork.IPv4 == nil ||
+				ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork == "" {
+				mismatches = append(
+					mismatches,
+					fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s", v4.MachineNetwork),
+				)
+			} else if !cidrEqual(v4.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork) {
+				mismatches = append(
+					mismatches,
+					fmt.Sprintf(
+						"cluster ipv4 machineNetwork not observed: want %s got %s",
+						v4.MachineNetwork,
+						ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork,
+					),
+				)
 			}
 		}
 	}
 
 	// Validate IPv6 if requested
 	if v6 := ipc.Spec.IPv6; v6 != nil {
-		if ipc.Status.HostNetwork.IPv6 == nil {
+		if ipc.Status.Network.HostNetwork.IPv6 == nil {
 			mismatches = append(mismatches, "hostNetwork.ipv6 missing")
 		} else {
 			if err := compareAddressWithPrefix(
 				controllerutils.IPv6FamilyName,
 				v6.Address,
-				ipc.Status.HostNetwork.IPv6.Address,
+				ipc.Status.Network.HostNetwork.IPv6.Address,
 			); err != nil {
-				mismatches = append(mismatches, err.Error())
+				mismatches = append(mismatches, fmt.Sprintf(
+					"ipv6 address mismatch: spec=%s status=%s",
+					v6.Address,
+					ipc.Status.Network.HostNetwork.IPv6.Address,
+				))
 			}
-			if !cidrEqual(v6.MachineNetwork, ipc.Status.HostNetwork.IPv6.MachineNetwork) {
-				mismatches = append(mismatches, fmt.Sprintf("ipv6 machineNetwork mismatch: spec=%s status=%s", v6.MachineNetwork, ipc.Status.HostNetwork.IPv6.MachineNetwork))
+			if !cidrEqual(v6.MachineNetwork, ipc.Status.Network.HostNetwork.IPv6.MachineNetwork) {
+				mismatches = append(
+					mismatches, fmt.Sprintf(
+						"ipv6 machineNetwork mismatch: spec=%s status=%s",
+						v6.MachineNetwork,
+						ipc.Status.Network.HostNetwork.IPv6.MachineNetwork,
+					))
 			}
-			if v6.Gateway != "" && v6.Gateway != ipc.Status.HostNetwork.IPv6.Gateway {
-				mismatches = append(mismatches, fmt.Sprintf("ipv6 gateway mismatch: spec=%s status=%s", v6.Gateway, ipc.Status.HostNetwork.IPv6.Gateway))
+			if v6.Gateway != "" && v6.Gateway != ipc.Status.Network.HostNetwork.IPv6.Gateway {
+				mismatches = append(
+					mismatches, fmt.Sprintf(
+						"ipv6 gateway mismatch: spec=%s status=%s",
+						v6.Gateway,
+						ipc.Status.Network.HostNetwork.IPv6.Gateway,
+					))
 			}
-			if v6.DNSServer != "" && v6.DNSServer != ipc.Status.HostNetwork.IPv6.DNSServer {
-				mismatches = append(mismatches, fmt.Sprintf("ipv6 dns mismatch: spec=%s status=%s", v6.DNSServer, ipc.Status.HostNetwork.IPv6.DNSServer))
+			if v6.DNSServer != "" && v6.DNSServer != ipc.Status.Network.HostNetwork.IPv6.DNSServer {
+				mismatches = append(mismatches, fmt.Sprintf(
+					"ipv6 dns mismatch: spec=%s status=%s",
+					v6.DNSServer,
+					ipc.Status.Network.HostNetwork.IPv6.DNSServer,
+				))
 			}
 		}
 
-		wantIP, _, err := splitAddr(v6.Address)
-		if err != nil {
-			mismatches = append(mismatches, fmt.Sprintf("ipv6 spec address invalid: %v", err))
-		} else {
-			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv6 == nil || ipc.Status.ClusterNetwork.IPv6.Address == "" {
-				mismatches = append(mismatches, "cluster ipv6 not observed: ipv6 address missing")
-			} else if !ipEqual(wantIP, ipc.Status.ClusterNetwork.IPv6.Address) {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 not observed: want %s got %s", wantIP, ipc.Status.ClusterNetwork.IPv6.Address))
-			}
+		if ipc.Status.Network.ClusterNetwork == nil ||
+			ipc.Status.Network.ClusterNetwork.IPv6 == nil ||
+			ipc.Status.Network.ClusterNetwork.IPv6.Address == "" {
+			mismatches = append(mismatches, "cluster ipv6 not observed: ipv6 address missing")
+		} else if !ipEqual(v6.Address, ipc.Status.Network.ClusterNetwork.IPv6.Address) {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"cluster ipv6 not observed: want %s got %s",
+				v6.Address,
+				ipc.Status.Network.ClusterNetwork.IPv6.Address,
+			))
 		}
-		// Machine network must be present and match exactly
+
 		if v6.MachineNetwork != "" {
-			if ipc.Status.ClusterNetwork == nil || ipc.Status.ClusterNetwork.IPv6 == nil || ipc.Status.ClusterNetwork.IPv6.MachineNetwork == "" {
+			if ipc.Status.Network.ClusterNetwork == nil ||
+				ipc.Status.Network.ClusterNetwork.IPv6 == nil ||
+				ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork == "" {
 				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s", v6.MachineNetwork))
-			} else if !cidrEqual(v6.MachineNetwork, ipc.Status.ClusterNetwork.IPv6.MachineNetwork) {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s got %s", v6.MachineNetwork, ipc.Status.ClusterNetwork.IPv6.MachineNetwork))
+			} else if !cidrEqual(v6.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork) {
+				mismatches = append(mismatches,
+					fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s got %s",
+						v6.MachineNetwork,
+						ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork,
+					))
 			}
 		}
 	}
