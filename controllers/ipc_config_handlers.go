@@ -129,6 +129,15 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 	ipc *ipcv1.IPConfig,
 	logger logr.Logger,
 ) (ctrl.Result, error) {
+	if err := statusIPsMatchSpec(ipc); err == nil {
+		controllerutils.SetIPConfigStatusCompleted(ipc, "IPConfig status matches spec; nothing to do")
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		logger.Info("IPConfig status matches spec")
+		return doNotRequeue(), nil
+	}
+
 	controllerutils.SetIPConfigStatusInProgress(ipc, "Configuration preparation is in progress")
 	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -416,6 +425,11 @@ func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 
 	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigPhasePostConfiguration)
 	controllerutils.StopIPStageHistory(h.Client, logger, ipc)
+	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed successfully")
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	logger.Info("Finished post-configuration phase successfully")
 
 	return doNotRequeue(), nil
@@ -430,9 +444,7 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 		return fmt.Errorf("nothing requested, shouldn't happen")
 	}
 
-	if ipc.Status.Network == nil ||
-		ipc.Status.Network.HostNetwork == nil ||
-		ipc.Status.Network.ClusterNetwork == nil {
+	if ipc.Status.Network == nil || ipc.Status.Network.HostNetwork == nil || ipc.Status.Network.ClusterNetwork == nil {
 		return fmt.Errorf("host/cluster network not yet populated")
 	}
 
@@ -478,9 +490,7 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 			}
 		}
 
-		if ipc.Status.Network.ClusterNetwork == nil ||
-			ipc.Status.Network.ClusterNetwork.IPv4 == nil ||
-			ipc.Status.Network.ClusterNetwork.IPv4.Address == "" {
+		if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv4 == nil || ipc.Status.Network.ClusterNetwork.IPv4.Address == "" {
 			mismatches = append(
 				mismatches,
 				"cluster ipv4 not observed: ipv4 address missing",
@@ -488,18 +498,12 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 		} else if !ipEqual(v4.Address, ipc.Status.Network.ClusterNetwork.IPv4.Address) {
 			mismatches = append(
 				mismatches,
-				fmt.Sprintf(
-					"cluster ipv4 not observed: want %s got %s",
-					v4.Address,
-					ipc.Status.Network.ClusterNetwork.IPv4.Address,
-				),
+				fmt.Sprintf("cluster ipv4 not observed: want %s got %s", v4.Address, ipc.Status.Network.ClusterNetwork.IPv4.Address),
 			)
 		}
 
 		if v4.MachineNetwork != "" {
-			if ipc.Status.Network.ClusterNetwork == nil ||
-				ipc.Status.Network.ClusterNetwork.IPv4 == nil ||
-				ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork == "" {
+			if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv4 == nil || ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork == "" {
 				mismatches = append(
 					mismatches,
 					fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s", v4.MachineNetwork),
@@ -507,11 +511,7 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 			} else if !cidrEqual(v4.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork) {
 				mismatches = append(
 					mismatches,
-					fmt.Sprintf(
-						"cluster ipv4 machineNetwork not observed: want %s got %s",
-						v4.MachineNetwork,
-						ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork,
-					),
+					fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s got %s", v4.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork),
 				)
 			}
 		}
@@ -558,9 +558,7 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 			}
 		}
 
-		if ipc.Status.Network.ClusterNetwork == nil ||
-			ipc.Status.Network.ClusterNetwork.IPv6 == nil ||
-			ipc.Status.Network.ClusterNetwork.IPv6.Address == "" {
+		if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv6 == nil || ipc.Status.Network.ClusterNetwork.IPv6.Address == "" {
 			mismatches = append(mismatches, "cluster ipv6 not observed: ipv6 address missing")
 		} else if !ipEqual(v6.Address, ipc.Status.Network.ClusterNetwork.IPv6.Address) {
 			mismatches = append(mismatches, fmt.Sprintf(
@@ -571,9 +569,7 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 		}
 
 		if v6.MachineNetwork != "" {
-			if ipc.Status.Network.ClusterNetwork == nil ||
-				ipc.Status.Network.ClusterNetwork.IPv6 == nil ||
-				ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork == "" {
+			if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv6 == nil || ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork == "" {
 				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s", v6.MachineNetwork))
 			} else if !cidrEqual(v6.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork) {
 				mismatches = append(mismatches,
@@ -593,18 +589,37 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 }
 
 func compareAddressWithPrefix(family, specAddr, statusAddr string) error {
-	sSpecIP, sSpecPref, err := splitAddr(specAddr)
+	specIP, specPref, specHasPref, err := parseAddrMaybePrefix(specAddr)
 	if err != nil {
 		return fmt.Errorf("%s spec address invalid: %v", family, err)
 	}
-	sStatIP, sStatPref, err := splitAddr(statusAddr)
+	statIP, statPref, statHasPref, err := parseAddrMaybePrefix(statusAddr)
 	if err != nil {
 		return fmt.Errorf("%s status address invalid: %v", family, err)
 	}
-	if !ipEqual(sSpecIP, sStatIP) || sSpecPref != sStatPref {
-		return fmt.Errorf("%s address mismatch: spec=%s/%d status=%s/%d", family, sSpecIP, sSpecPref, sStatIP, sStatPref)
+	if !ipEqual(specIP, statIP) {
+		return fmt.Errorf("%s address mismatch: ip differs: spec=%s status=%s", family, specAddr, statusAddr)
+	}
+	if specHasPref && statHasPref && specPref != statPref {
+		return fmt.Errorf("%s address mismatch: prefix differs: spec=%s/%d status=%s/%d", family, specIP, specPref, statIP, statPref)
 	}
 	return nil
+}
+
+func parseAddrMaybePrefix(addr string) (string, int, bool, error) {
+	a := strings.Trim(addr, "[]")
+	if strings.Contains(a, "/") {
+		ip, pref, err := splitAddr(a)
+		if err != nil {
+			return "", 0, false, err
+		}
+		return ip, pref, true, nil
+	}
+	pi := net.ParseIP(a)
+	if pi == nil {
+		return "", 0, false, fmt.Errorf("invalid ip")
+	}
+	return pi.String(), 0, false, nil
 }
 
 func splitAddr(addr string) (string, int, error) {
@@ -699,6 +714,12 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 	recertImage := getRecertImage(ipc)
 	if recertImage != "" {
 		cfg.RecertImage = recertImage
+	}
+
+	if ipc.Spec.Recert != nil &&
+		ipc.Spec.Recert.PullSecretRef != nil &&
+		ipc.Spec.Recert.PullSecretRef.Name != "" {
+		cfg.PullSecretRefName = ipc.Spec.Recert.PullSecretRef.Name
 	}
 
 	data, err := json.Marshal(cfg)

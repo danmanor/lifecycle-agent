@@ -75,6 +75,7 @@ const (
 	LCAConfigDir               = "/var/lib/lca"
 	LCAWorkspaceDir            = LCAConfigDir + "/workspace"
 	IPConfigRunFlagsFile       = LCAWorkspaceDir + "/ip-config-run.json"
+	IPConfigRunPullSecretFile  = LCAWorkspaceDir + "/recert-pull-secret.json"
 	IPConfigRunStatusFile      = LCAWorkspaceDir + "/ip-config-run-status.json"
 	IPConfigPrepareStatusFile  = LCAWorkspaceDir + "/ip-config-prepare-status.json"
 	IPConfigRollbackStatusFile = LCAWorkspaceDir + "/ip-config-rollback-status.json"

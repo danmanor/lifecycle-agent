@@ -34,8 +34,8 @@ import (
 // +kubebuilder:printcolumn:name="Current IPv6",type="string",JSONPath=".status.network.clusterNetwork.ipv6.address",priority=1
 // +kubebuilder:printcolumn:name="Desired IPv6",type="string",JSONPath=".spec.ipv6.address",priority=1
 // +kubebuilder:validation:XValidation:message="ipconfig is a singleton, metadata.name must be 'ipconfig'", rule="self.metadata.name == 'ipconfig'"
-// +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
-// +kubebuilder:validation:XValidation:message="can not change spec.ipv6 while ipconfig is in progress",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv4 while ipconfig is not idle",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4) && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)"
+// +kubebuilder:validation:XValidation:message="can not change spec.ipv6 while ipconfig is not idle",rule="!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type=='Idle' && c.status=='True') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6) && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)"
 
 // IPConfig is the Schema for controlling node IP configuration lifecycle via lca-cli ip-config.
 type IPConfig struct {
@@ -115,7 +115,9 @@ type RecertSpec struct {
 	// pullSecretRef is the name of a Secret in the lifecycle-agent namespace containing .dockerconfigjson
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	PullSecretRef *PullSecretRef `json:"pullSecretRef,omitempty"`
-	// image is the full pull-spec of the recert container image to use
+	// +kubebuilder:validation:Required
+	// +required
+	// image is the full pull-spec of the recert container image to use. Will be synced to the host only during Idle stage.
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Image string `json:"image,omitempty"`
 	// cacheInterval defines how often the controller attempts to cache the recert image on the host
@@ -186,6 +188,22 @@ type IPConfigStatus struct {
 	// History stores timing info of different IPConfig stages and their important phases
 	// +optional
 	History []*IPHistory `json:"history,omitempty"`
+
+	// RecertCache summarizes recert image caching details while in Idle
+	// +optional
+	RecertCache *RecertCacheStatus `json:"recertCache,omitempty"`
+}
+
+// RecertCacheStatus contains details about the recert image cache
+type RecertCacheStatus struct {
+	// Image is the pull-spec used for recert
+	Image string `json:"image,omitempty"`
+	// PullSecretRefName is the name of the secret used to pull the image
+	PullSecretRefName string `json:"pullSecretRefName,omitempty"`
+	// LastRefreshTime is when the image was last refreshed
+	LastRefreshTime metav1.Time `json:"lastRefreshTime,omitempty"`
+	// Interval is how often the controller attempts to refresh the image
+	Interval metav1.Duration `json:"interval,omitempty"`
 }
 
 // HostNetworkStatus summarizes current host network

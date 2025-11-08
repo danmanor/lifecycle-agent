@@ -56,20 +56,8 @@ func (h *IPConfigIdleStageHandler) Handle(
 	logger := log.FromContext(ctx).WithName("IPConfigIdle")
 	logger.Info("Starting handleIdle")
 
-	recertCacheInterval := getRecertCacheInterval(ipc)
-	if shouldRefresh := h.shouldRefreshRecertImage(ipc, recertCacheInterval); shouldRefresh {
-		if err := h.refreshRecertImage(ctx, ipc, logger); err != nil {
-			return requeueWithError(fmt.Errorf("failed to refresh recert image: %w", err))
-		}
-
-		if ipc.Annotations == nil {
-			ipc.Annotations = map[string]string{}
-		}
-
-		ipc.Annotations[controllerutils.IPConfigRecertCacheLastRefreshAnnotation] = time.Now().UTC().Format(time.RFC3339)
-		if err := h.Client.Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update last recert cache check annotation: %w", err))
-		}
+	if err := h.refreshRecertCacheIfNeeded(ctx, ipc, logger); err != nil {
+		return requeueWithError(err)
 	}
 
 	if err := h.handleManualCleanupIfFailed(ctx, ipc, logger); err != nil {
@@ -93,7 +81,7 @@ func (h *IPConfigIdleStageHandler) Handle(
 	logger.Info("Running health checks")
 	if err := CheckHealth(ctx, h.NoncachedClient, logger); err != nil {
 		msg := fmt.Sprintf("Waiting for system to stabilize: %s", err.Error())
-		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Failed, msg)
+		controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.Stabilizing, msg)
 		if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 		}
@@ -134,14 +122,14 @@ func (h *IPConfigIdleStageHandler) cleanup(logger logr.Logger) error {
 		return fmt.Errorf("failed to clean up unbooted stateroots: %w", err)
 	}
 
-	if err := cleanupIPConfigFiles(h.ChrootOps); err != nil {
+	if err := cleanupLCAWorkspace(h.ChrootOps); err != nil {
 		return fmt.Errorf("failed to cleanup workspace: %w", err)
 	}
 
 	return nil
 }
 
-func cleanupIPConfigFiles(chrootOps ops.Ops) error {
+func cleanupLCAWorkspace(chrootOps ops.Ops) error {
 	if _, err := chrootOps.StatFile(
 		common.PathOutsideChroot(controllerutils.IPConfigWorkspacePath),
 	); err != nil {
@@ -250,18 +238,58 @@ func getStaterootsToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]string, e
 
 // shouldRefreshRecertImage determines if enough time has passed to run the recert image cache refresh again
 func (h *IPConfigIdleStageHandler) shouldRefreshRecertImage(ipc *ipcv1.IPConfig, interval time.Duration) bool {
-	if ipc.Annotations == nil {
+	desiredImage := getRecertImage(ipc)
+	var desiredPullSecret string
+	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
+		desiredPullSecret = ipc.Spec.Recert.PullSecretRef.Name
+	}
+
+	if ipc.Status.RecertCache == nil || ipc.Status.RecertCache.LastRefreshTime.IsZero() {
 		return true
 	}
-	last := ipc.Annotations[controllerutils.IPConfigRecertCacheLastRefreshAnnotation]
-	if last == "" {
+
+	if ipc.Status.RecertCache.Image != desiredImage ||
+		ipc.Status.RecertCache.PullSecretRefName != desiredPullSecret ||
+		ipc.Status.RecertCache.Interval.Duration != interval {
 		return true
 	}
-	ts, err := time.Parse(time.RFC3339, last)
-	if err != nil {
-		return true
+
+	return time.Since(ipc.Status.RecertCache.LastRefreshTime.Time) >= interval
+}
+
+// refreshRecertCacheIfNeeded evaluates desired vs. current recert cache state and refreshes if needed.
+func (h *IPConfigIdleStageHandler) refreshRecertCacheIfNeeded(
+	ctx context.Context,
+	ipc *ipcv1.IPConfig,
+	logger logr.Logger,
+) error {
+	recertCacheInterval := getRecertCacheInterval(ipc)
+	if !h.shouldRefreshRecertImage(ipc, recertCacheInterval) {
+		return nil
 	}
-	return time.Since(ts) >= interval
+
+	if err := h.refreshRecertImage(ctx, ipc, logger); err != nil {
+		return fmt.Errorf("failed to refresh recert image: %w", err)
+	}
+
+	if ipc.Status.RecertCache == nil {
+		ipc.Status.RecertCache = &ipcv1.RecertCacheStatus{}
+	}
+
+	ipc.Status.RecertCache.Image = getRecertImage(ipc)
+
+	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
+		ipc.Status.RecertCache.PullSecretRefName = ipc.Spec.Recert.PullSecretRef.Name
+	}
+
+	ipc.Status.RecertCache.LastRefreshTime = metav1.NewTime(time.Now().UTC())
+	ipc.Status.RecertCache.Interval = metav1.Duration{Duration: recertCacheInterval}
+
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
+		return fmt.Errorf("failed to update recert cache status: %w", err)
+	}
+
+	return nil
 }
 
 // getRecertImageFromIPC resolves the recert image to use in priority: spec, env, default

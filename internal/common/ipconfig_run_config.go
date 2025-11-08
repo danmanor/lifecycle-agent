@@ -12,7 +12,7 @@ type IPConfigRunConfig struct {
 	HTTPProxy          string `json:"http-proxy,omitempty"`
 	HTTPSProxy         string `json:"https-proxy,omitempty"`
 	NoProxy            string `json:"no-proxy,omitempty"`
-	PullSecretFile     string `json:"pull-secret-file,omitempty"`
+	PullSecretRefName  string `json:"pull-secret-ref-name,omitempty"`
 	RecertImage        string `json:"recert-image,omitempty"`
 }
 

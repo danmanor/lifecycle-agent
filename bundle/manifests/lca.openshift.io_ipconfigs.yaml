@@ -141,7 +141,7 @@ spec:
                     type: string
                   image:
                     description: image is the full pull-spec of the recert container
-                      image to use
+                      image to use. Will be synced to the host only during Idle stage.
                     type: string
                   pullSecretRef:
                     description: pullSecretRef is the name of a Secret in the lifecycle-agent
@@ -359,6 +359,26 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              recertCache:
+                description: RecertCache summarizes recert image caching details while
+                  in Idle
+                properties:
+                  image:
+                    description: Image is the pull-spec used for recert
+                    type: string
+                  interval:
+                    description: Interval is how often the controller attempts to
+                      refresh the image
+                    type: string
+                  lastRefreshTime:
+                    description: LastRefreshTime is when the image was last refreshed
+                    format: date-time
+                    type: string
+                  pullSecretRefName:
+                    description: PullSecretRefName is the name of the secret used
+                      to pull the image
+                    type: string
+                type: object
               validNextStages:
                 description: ValidNextStages enumerates allowed next transitions from
                   current stage
@@ -371,11 +391,11 @@ spec:
         x-kubernetes-validations:
         - message: ipconfig is a singleton, metadata.name must be 'ipconfig'
           rule: self.metadata.name == 'ipconfig'
-        - message: can not change spec.ipv4 while ipconfig is in progress
+        - message: can not change spec.ipv4 while ipconfig is not idle
           rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
             && c.status==''True'') || has(oldSelf.spec.ipv4) && has(self.spec.ipv4)
             && oldSelf.spec.ipv4==self.spec.ipv4 || !has(self.spec.ipv4) && !has(oldSelf.spec.ipv4)'
-        - message: can not change spec.ipv6 while ipconfig is in progress
+        - message: can not change spec.ipv6 while ipconfig is not idle
           rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
             && c.status==''True'') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6)
             && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)'

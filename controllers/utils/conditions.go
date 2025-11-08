@@ -70,6 +70,7 @@ var ConditionReasons = struct {
 	FinalizeCompleted ConditionReason
 	FinalizeFailed    ConditionReason
 	InvalidTransition ConditionReason
+	Stabilizing       ConditionReason
 }{
 	Idle:              "Idle",
 	Completed:         "Completed",
@@ -83,6 +84,7 @@ var ConditionReasons = struct {
 	FinalizeCompleted: "FinalizeCompleted",
 	FinalizeFailed:    "FinalizeFailed",
 	InvalidTransition: "InvalidTransition",
+	Stabilizing:       "Stabilizing",
 }
 
 // Common condition messages

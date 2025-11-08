@@ -17,15 +17,19 @@ limitations under the License.
 package ipconfigcmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -54,7 +58,7 @@ var (
 	httpProxy          string
 	httpsProxy         string
 	noProxy            string
-	pullSecretFile     string
+	pullSecretRefName  string
 	recertImage        string
 )
 
@@ -78,8 +82,8 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&httpProxy, "http-proxy", "", "HTTP proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
 	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
-	ipConfigRunCmd.Flags().StringVar(&pullSecretFile, "pull-secret-file", "", "Path to pull secret auth file to use for image pulls")
 	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
+	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, "pull-secret-ref-name", "", "The name of the pull secret to use for the recert container tool")
 }
 
 var ipConfigRunCmd = &cobra.Command{
@@ -117,7 +121,7 @@ func runIPConfigChange() error {
 			httpProxy = cfg.HTTPProxy
 			httpsProxy = cfg.HTTPSProxy
 			noProxy = cfg.NoProxy
-			pullSecretFile = cfg.PullSecretFile
+			pullSecretRefName = cfg.PullSecretRefName
 			recertImage = cfg.RecertImage
 		} else {
 			pkgLog.Warnf("failed to unmarshal ip-config run config: %v", jsonErr)
@@ -164,6 +168,16 @@ func runIPConfigChange() error {
 		return fmt.Errorf("failed to create runtime client: %w", err)
 	}
 
+	var pullSecretFile = common.ImageRegistryAuthFile
+	if pullSecretRefName != "" {
+		authPath, err := materializeAuthFileFromPullSecretRef(context.Background(), client, pullSecretRefName)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(common.PathOutsideChroot(authPath))
+		pullSecretFile = authPath
+	}
+
 	ipConfigHandler := ipconfig.NewIPConfig(
 		pkgLog,
 		opsInterface,
@@ -204,6 +218,31 @@ func runIPConfigChange() error {
 	}
 
 	return nil
+}
+
+// materializeAuthFileFromPullSecretRef fetches the dockerconfigjson secret by name in the LCA namespace
+// and writes it to an auth file under the LCA workspace, returning the path to the file.
+func materializeAuthFileFromPullSecretRef(
+	ctx context.Context,
+	c runtimeClient.Client,
+	secretName string,
+) (string, error) {
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{
+		Namespace: common.LcaNamespace,
+		Name:      secretName,
+	}, secret); err != nil {
+		return "", fmt.Errorf("failed to fetch pull secret %s/%s: %w", common.LcaNamespace, secretName, err)
+	}
+	dockercfg, ok := secret.Data[corev1.DockerConfigJsonKey]
+	if !ok || len(dockercfg) == 0 {
+		return "", fmt.Errorf("secret %s/%s missing key %s", common.LcaNamespace, secretName, corev1.DockerConfigJsonKey)
+	}
+	authPath := path.Join(common.LCAWorkspaceDir, "recert-pull-secret.json")
+	if err := os.WriteFile(common.PathOutsideChroot(authPath), dockercfg, 0o600); err != nil {
+		return "", fmt.Errorf("failed to write pull secret auth file: %w", err)
+	}
+	return authPath, nil
 }
 
 // validateIPConfigArgs validates the CLI arguments for IP configuration.
