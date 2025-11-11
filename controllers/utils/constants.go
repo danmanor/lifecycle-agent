@@ -14,8 +14,11 @@ const (
 	IBUFilePath string = common.LCAConfigDir + "/ibu.json"
 	IPCFilePath string = common.LCAConfigDir + "/ipc.json"
 
-	ManualCleanupAnnotation    string = "lca.openshift.io/manual-cleanup-done"
-	TriggerReconcileAnnotation string = "lca.openshift.io/trigger-reconcile"
+	ManualCleanupAnnotation     string = "lca.openshift.io/manual-cleanup-done"
+	TriggerReconcileAnnotation  string = "lca.openshift.io/trigger-reconcile"
+	RecertImageAnnotation       string = "lca.openshift.io/recert-image"
+	RecertPullSecretAnnotation  string = "lca.openshift.io/recert-pull-secret"
+	RecertCachedImageAnnotation string = "lca.openshift.io/recert-image-cached"
 
 	// SeedGenName defines the valid name of the CR for the controller to reconcile
 	SeedGenName          string = "seedimage"

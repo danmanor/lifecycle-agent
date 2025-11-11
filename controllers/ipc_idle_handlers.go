@@ -3,10 +3,8 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
@@ -15,8 +13,6 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
-	lcautils "github.com/openshift-kni/lifecycle-agent/utils"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -55,10 +51,6 @@ func (h *IPConfigIdleStageHandler) Handle(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("IPConfigIdle")
 	logger.Info("Starting handleIdle")
-
-	if err := h.refreshRecertCacheIfNeeded(ctx, ipc, logger); err != nil {
-		return requeueWithError(err)
-	}
 
 	if err := h.handleManualCleanupIfFailed(ctx, ipc, logger); err != nil {
 		return requeueWithError(fmt.Errorf("failed to handle manual cleanup if failed: %w", err))
@@ -110,7 +102,7 @@ func (h *IPConfigIdleStageHandler) Handle(
 
 	logger.Info("handleIdle completed successfully")
 
-	return requeueWithCustomInterval(getRecertCacheInterval(ipc)), nil
+	return doNotRequeue(), nil
 }
 
 func (h *IPConfigIdleStageHandler) cleanup(logger logr.Logger) error {
@@ -236,136 +228,7 @@ func getStaterootsToRemove(rpmOstreeClient rpmostreeclient.IClient) ([]string, e
 	return toRemove, nil
 }
 
-// shouldRefreshRecertImage determines if enough time has passed to run the recert image cache refresh again
-func (h *IPConfigIdleStageHandler) shouldRefreshRecertImage(ipc *ipcv1.IPConfig, interval time.Duration) bool {
-	desiredImage := getRecertImage(ipc)
-	var desiredPullSecret string
-	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
-		desiredPullSecret = ipc.Spec.Recert.PullSecretRef.Name
-	}
-
-	if ipc.Status.RecertCache == nil || ipc.Status.RecertCache.LastRefreshTime.IsZero() {
-		return true
-	}
-
-	if ipc.Status.RecertCache.Image != desiredImage ||
-		ipc.Status.RecertCache.PullSecretRefName != desiredPullSecret ||
-		ipc.Status.RecertCache.Interval.Duration != interval {
-		return true
-	}
-
-	return time.Since(ipc.Status.RecertCache.LastRefreshTime.Time) >= interval
-}
-
-// refreshRecertCacheIfNeeded evaluates desired vs. current recert cache state and refreshes if needed.
-func (h *IPConfigIdleStageHandler) refreshRecertCacheIfNeeded(
-	ctx context.Context,
-	ipc *ipcv1.IPConfig,
-	logger logr.Logger,
-) error {
-	recertCacheInterval := getRecertCacheInterval(ipc)
-	if !h.shouldRefreshRecertImage(ipc, recertCacheInterval) {
-		return nil
-	}
-
-	if err := h.refreshRecertImage(ctx, ipc, logger); err != nil {
-		return fmt.Errorf("failed to refresh recert image: %w", err)
-	}
-
-	if ipc.Status.RecertCache == nil {
-		ipc.Status.RecertCache = &ipcv1.RecertCacheStatus{}
-	}
-
-	ipc.Status.RecertCache.Image = getRecertImage(ipc)
-
-	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
-		ipc.Status.RecertCache.PullSecretRefName = ipc.Spec.Recert.PullSecretRef.Name
-	}
-
-	ipc.Status.RecertCache.LastRefreshTime = metav1.NewTime(time.Now().UTC())
-	ipc.Status.RecertCache.Interval = metav1.Duration{Duration: recertCacheInterval}
-
-	if err := h.Client.Status().Update(ctx, ipc); err != nil {
-		return fmt.Errorf("failed to update recert cache status: %w", err)
-	}
-
-	return nil
-}
-
-// getRecertImageFromIPC resolves the recert image to use in priority: spec, env, default
-func getRecertImage(ipc *ipcv1.IPConfig) string {
-	if ipc.Spec.Recert != nil && ipc.Spec.Recert.Image != "" {
-		return ipc.Spec.Recert.Image
-	}
-	if v := os.Getenv(common.RecertImageEnvKey); v != "" {
-		return v
-	}
-	return common.DefaultRecertImage
-}
-
-func getRecertCacheInterval(ipc *ipcv1.IPConfig) time.Duration {
-	if ipc.Spec.Recert != nil && ipc.Spec.Recert.CacheInterval.Duration > 0 {
-		return ipc.Spec.Recert.CacheInterval.Duration
-	}
-	return 1 * time.Hour
-}
-
-// refreshRecertImage pulls the recert image
-func (h *IPConfigIdleStageHandler) refreshRecertImage(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) error {
-	image := getRecertImage(ipc)
-	if image == "" {
-		return nil
-	}
-
-	authFile := common.ImageRegistryAuthFile
-	if ipc.Spec.Recert != nil && ipc.Spec.Recert.PullSecretRef != nil {
-		pullSecret, err := lcautils.GetSecretData(
-			ctx, ipc.Spec.Recert.PullSecretRef.Name,
-			common.LcaNamespace,
-			corev1.DockerConfigJsonKey,
-			h.Client,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to get pull-secret with the name %s in namespace %s holding the key %s: %w",
-				ipc.Spec.Recert.PullSecretRef.Name,
-				common.LcaNamespace,
-				corev1.DockerConfigJsonKey,
-				err,
-			)
-		}
-
-		tempAuthFile, err := os.CreateTemp(os.TempDir(), "recert-pull-secret.json")
-		if err != nil {
-			return fmt.Errorf("failed to create temporary pull secret file: %w", err)
-		}
-		defer tempAuthFile.Close()
-
-		if _, err := tempAuthFile.Write([]byte(pullSecret)); err != nil {
-			return fmt.Errorf("failed to write pull secret to temporary file: %w", err)
-		}
-
-		authFile = tempAuthFile.Name()
-	}
-
-	command := "podman"
-	if ipc.Spec.Proxy != nil {
-		noProxy := strings.Join(ipc.Spec.Proxy.NoProxy, ",")
-		httpProxy := ipc.Spec.Proxy.HTTPProxy
-		httpsProxy := ipc.Spec.Proxy.HTTPSProxy
-		if httpProxy != "" || httpsProxy != "" || noProxy != "" {
-			command = fmt.Sprintf("HTTP_PROXY=%s HTTPS_PROXY=%s NO_PROXY=%s %s", httpProxy, httpsProxy, noProxy, command)
-		}
-	}
-
-	if _, err := h.ChrootOps.RunBashInHostNamespace(command, "pull", "--authfile", authFile, image); err != nil {
-		return fmt.Errorf("failed to pull recert image %s: %w", image, err)
-	}
-
-	logger.Info("recert image cached on host", "image", image)
-
-	return nil
-}
+// (recert image caching moved to main controller; periodic caching removed)
 
 func (h *IPConfigIdleStageHandler) handleManualCleanupIfFailed(
 	ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger,

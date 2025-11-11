@@ -119,40 +119,6 @@ spec:
                       (e.g., 192.0.2.0/24)
                     type: string
                 type: object
-              proxy:
-                description: Optional proxy settings
-                properties:
-                  httpProxy:
-                    type: string
-                  httpsProxy:
-                    type: string
-                  noProxy:
-                    items:
-                      type: string
-                    type: array
-                type: object
-              recert:
-                description: Recert configuration
-                properties:
-                  cacheInterval:
-                    description: |-
-                      cacheInterval defines how often the controller attempts to cache the recert image on the host
-                      when IPConfig is Idle. If unset, a default is used.
-                    type: string
-                  image:
-                    description: image is the full pull-spec of the recert container
-                      image to use. Will be synced to the host only during Idle stage.
-                    type: string
-                  pullSecretRef:
-                    description: pullSecretRef is the name of a Secret in the lifecycle-agent
-                      namespace containing .dockerconfigjson
-                    properties:
-                      name:
-                        type: string
-                    required:
-                    - name
-                    type: object
-                type: object
               stage:
                 description: IPConfigStage defines the type for the stage field
                 enum:
@@ -359,26 +325,6 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
-              recertCache:
-                description: RecertCache summarizes recert image caching details while
-                  in Idle
-                properties:
-                  image:
-                    description: Image is the pull-spec used for recert
-                    type: string
-                  interval:
-                    description: Interval is how often the controller attempts to
-                      refresh the image
-                    type: string
-                  lastRefreshTime:
-                    description: LastRefreshTime is when the image was last refreshed
-                    format: date-time
-                    type: string
-                  pullSecretRefName:
-                    description: PullSecretRefName is the name of the secret used
-                      to pull the image
-                    type: string
-                type: object
               validNextStages:
                 description: ValidNextStages enumerates allowed next transitions from
                   current stage

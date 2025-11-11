@@ -9,11 +9,13 @@ import (
 	"strings"
 	"time"
 
+	ocp_config_v1 "github.com/openshift/api/config/v1"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,7 +43,6 @@ type IPConfigHandler struct {
 	workingDir     string
 	IPConfigs      []*NetworkIPConfig
 	runtimeClient  runtimeclient.Client
-	Proxy          *ProxyConfig
 	PullSecretFile string
 }
 
@@ -54,7 +55,6 @@ func NewIPConfig(
 	recertImage string,
 	workingDir string,
 	ipConfigs []*NetworkIPConfig,
-	proxy *ProxyConfig,
 	pullSecretFile string,
 ) *IPConfigHandler {
 	return &IPConfigHandler{
@@ -65,27 +65,48 @@ func NewIPConfig(
 		workingDir:     workingDir,
 		runtimeClient:  runtimeClient,
 		IPConfigs:      ipConfigs,
-		Proxy:          proxy,
 		PullSecretFile: pullSecretFile,
 	}
 }
 
 type ProxyConfig struct {
-	HTTPProxy  string
-	HTTPSProxy string
-	NoProxy    string
+	HTTPProxy        string
+	HTTPSProxy       string
+	NoProxy          string
+	StatusHTTPProxy  string
+	StatusHTTPSProxy string
+	StatusNoProxy    string
 }
 
 func (i *IPConfigHandler) RunIPConfigChange() error {
 	i.log.Infof("Starting IP config process")
 	for _, ipConfig := range i.IPConfigs {
-		i.log.Infof(
-			"Changing IP to %s, machine network to %s, gateway to %s, DNS server to %s",
-			ipConfig.IP, ipConfig.MachineNetwork, ipConfig.Gateway, ipConfig.DNSServer,
-		)
+		if ipConfig == nil {
+			continue
+		}
+		if ipConfig.IP != "" {
+			i.log.Infof("Changing IP to %s", ipConfig.IP)
+		}
+		if ipConfig.MachineNetwork != "" {
+			i.log.Infof("Changing machine network to %s", ipConfig.MachineNetwork)
+		}
+		if ipConfig.Gateway != "" {
+			i.log.Infof("Changing gateway to %s", ipConfig.Gateway)
+		}
+		if ipConfig.DNSServer != "" {
+			i.log.Infof("Changing DNS server to %s", ipConfig.DNSServer)
+		}
 	}
 
 	ctx := context.Background()
+
+	proxy, err := i.computeAndSetProxy(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to compute proxy configuration: %w", err)
+	}
+	if proxy != nil {
+		i.log.Info("Proxy is set")
+	}
 
 	if err := i.createWorkingDir(); err != nil {
 		return fmt.Errorf("failed to create working directory: %w", err)
@@ -125,15 +146,11 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 		return err
 	}
 
-	if err := i.runRecert(installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs); err != nil {
+	if err := i.runRecert(installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs, proxy); err != nil {
 		return err
 	}
 
 	if err := i.ops.EnsureNMStateConfigurationServiceEnabled(); err != nil {
-		return err
-	}
-
-	if err := i.ops.EnableClusterServices(""); err != nil {
 		return err
 	}
 
@@ -153,9 +170,73 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 		return err
 	}
 
+	if err := i.ops.EnableClusterServices(""); err != nil {
+		return err
+	}
+
 	i.log.Info("IP config process completed successfully")
 
 	return nil
+}
+
+// computeAndSetProxy reads the cluster Proxy CR, and if proxy is configured,
+// calculates the effective NoProxy by combining:
+// - localhost defaults
+// - new machine networks provided to ip-config
+// - user-provided spec noProxy
+// It then sets both spec and status proxy on the handler to be passed to recert.
+func (i *IPConfigHandler) computeAndSetProxy(ctx context.Context) (*ProxyConfig, error) {
+	proxy := &ocp_config_v1.Proxy{}
+	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: common.OpenshiftProxyCRName}, proxy); err != nil {
+		return nil, fmt.Errorf("failed to get proxy: %w", err)
+	}
+
+	if proxy.Spec.HTTPProxy == "" && proxy.Spec.HTTPSProxy == "" && proxy.Spec.NoProxy == "" {
+		return nil, nil
+	}
+
+	clusterName, err := utils.GetClusterName(ctx, i.runtimeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cluster name: %w", err)
+	}
+	baseDomain, err := utils.GetClusterBaseDomain(ctx, i.runtimeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get base domain: %w", err)
+	}
+
+	set := sets.NewString(
+		"127.0.0.1",
+		"localhost",
+		".svc",
+		".cluster.local",
+		fmt.Sprintf("api-int.%s.%s", clusterName, baseDomain),
+	)
+
+	for _, cfg := range i.IPConfigs {
+		if cfg != nil && cfg.MachineNetwork != "" {
+			set.Insert(cfg.MachineNetwork)
+		}
+	}
+
+	if proxy.Spec.NoProxy != "" {
+		for _, userValue := range strings.Split(proxy.Spec.NoProxy, ",") {
+			userValue = strings.TrimSpace(userValue)
+			if userValue != "" {
+				set.Insert(userValue)
+			}
+		}
+	}
+
+	finalNoProxy := strings.Join(set.List(), ",")
+
+	return &ProxyConfig{
+		HTTPProxy:        proxy.Spec.HTTPProxy,
+		HTTPSProxy:       proxy.Spec.HTTPSProxy,
+		NoProxy:          finalNoProxy,
+		StatusHTTPProxy:  proxy.Status.HTTPProxy,
+		StatusHTTPSProxy: proxy.Status.HTTPSProxy,
+		StatusNoProxy:    finalNoProxy,
+	}, nil
 }
 
 func (i *IPConfigHandler) runRecert(
@@ -163,6 +244,7 @@ func (i *IPConfigHandler) runRecert(
 	ingressCertificateCN string,
 	cryptoDir string,
 	currentNodeIPs []string,
+	proxy *ProxyConfig,
 ) error {
 	i.log.Info("Creating recert configuration file")
 
@@ -180,6 +262,10 @@ func (i *IPConfigHandler) runRecert(
 		newMachineNetworks[i] = cfg.MachineNetwork
 	}
 
+	if proxy == nil {
+		proxy = &ProxyConfig{}
+	}
+
 	if err := recert.CreateRecertConfigFileForIPConfig(
 		oldIPs,
 		newIPs,
@@ -188,6 +274,12 @@ func (i *IPConfigHandler) runRecert(
 		cryptoDir,
 		ingressCertificateCN,
 		i.workingDir,
+		proxy.HTTPProxy,
+		proxy.HTTPSProxy,
+		proxy.NoProxy,
+		proxy.StatusHTTPProxy,
+		proxy.StatusHTTPSProxy,
+		proxy.StatusNoProxy,
 	); err != nil {
 		return fmt.Errorf("failed to create recert configuration file: %w", err)
 	}

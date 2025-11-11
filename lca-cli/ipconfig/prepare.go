@@ -42,11 +42,7 @@ func NewPrepareHandler(
 func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) (err error) {
 	p.log.Infof("IP config prepare started with IPv4: %s and IPv6: %s", newIPv4, newIPv6)
 
-	newStateroot, err := BuildStaterootName(newIPv4, newIPv6)
-	if err != nil {
-		return
-	}
-
+	newStateroot := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
 	if err = p.ensureSysrootWritable(); err != nil {
 		return
 	}

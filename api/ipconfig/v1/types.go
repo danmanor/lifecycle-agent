@@ -93,37 +93,11 @@ type VLANConfig struct {
 	ID int `json:"id,omitempty"`
 }
 
-// ProxyConfig represents optional proxy configuration
-type ProxyConfig struct {
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	HTTPProxy string `json:"httpProxy,omitempty"`
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	HTTPSProxy string `json:"httpsProxy,omitempty"`
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:arrayFieldGroup"}
-	NoProxy []string `json:"noProxy,omitempty"`
-}
-
 type PullSecretRef struct {
 	// +kubebuilder:validation:Required
 	// +required
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Name string `json:"name"`
-}
-
-// RecertSpec defines image pull settings for recert usage in IP config flow
-type RecertSpec struct {
-	// pullSecretRef is the name of a Secret in the lifecycle-agent namespace containing .dockerconfigjson
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	PullSecretRef *PullSecretRef `json:"pullSecretRef,omitempty"`
-	// +kubebuilder:validation:Required
-	// +required
-	// image is the full pull-spec of the recert container image to use. Will be synced to the host only during Idle stage.
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	Image string `json:"image,omitempty"`
-	// cacheInterval defines how often the controller attempts to cache the recert image on the host
-	// when IPConfig is Idle. If unset, a default is used.
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	CacheInterval metav1.Duration `json:"cacheInterval,omitempty"`
 }
 
 // IPConfigSpec defines the desired state of IPConfig
@@ -144,14 +118,6 @@ type IPConfigSpec struct {
 	// Optional VLAN applied to br-ex path
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="VLAN"
 	VLAN *VLANConfig `json:"vlan,omitempty"`
-
-	// Optional proxy settings
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy"
-	Proxy *ProxyConfig `json:"proxy,omitempty"`
-
-	// Recert configuration
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Recert"
-	Recert *RecertSpec `json:"recert,omitempty"`
 
 	// AutoRollbackOnFailure defines automatic rollback settings for IPConfig if the configuration
 	// does not complete within the specified time limit. Behavior mirrors IBU.
@@ -188,22 +154,6 @@ type IPConfigStatus struct {
 	// History stores timing info of different IPConfig stages and their important phases
 	// +optional
 	History []*IPHistory `json:"history,omitempty"`
-
-	// RecertCache summarizes recert image caching details while in Idle
-	// +optional
-	RecertCache *RecertCacheStatus `json:"recertCache,omitempty"`
-}
-
-// RecertCacheStatus contains details about the recert image cache
-type RecertCacheStatus struct {
-	// Image is the pull-spec used for recert
-	Image string `json:"image,omitempty"`
-	// PullSecretRefName is the name of the secret used to pull the image
-	PullSecretRefName string `json:"pullSecretRefName,omitempty"`
-	// LastRefreshTime is when the image was last refreshed
-	LastRefreshTime metav1.Time `json:"lastRefreshTime,omitempty"`
-	// Interval is how often the controller attempts to refresh the image
-	Interval metav1.Duration `json:"interval,omitempty"`
 }
 
 // HostNetworkStatus summarizes current host network

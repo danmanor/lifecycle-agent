@@ -217,3 +217,17 @@ func SanitizeForOsname(s string) string {
 	re := regexp.MustCompile(`[^A-Za-z0-9]+`)
 	return re.ReplaceAllString(s, "_")
 }
+
+func BuildNewStaterootNameFromIps(ipv4, ipv6 string) string {
+	parts := []string{"rhcos"}
+
+	if ipv4 != "" {
+		parts = append(parts, SanitizeForOsname(ipv4))
+	}
+
+	if ipv6 != "" {
+		parts = append(parts, SanitizeForOsname(ipv6))
+	}
+
+	return strings.Join(parts, "_")
+}

@@ -292,8 +292,9 @@ func NewIPCRebootClient(log *logr.Logger,
 }
 
 // WriteIPCAutoRollbackConfigFile writes the IP-config auto-rollback configuration to disk for the init monitor.
-func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error {
-	cfgfile := common.PathOutsideChroot(common.IPCAutoRollbackConfigFile)
+func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig, newStaterootName string) error {
+	staterootPath := common.GetStaterootPath(newStaterootName)
+	cfgfile := common.PathOutsideChroot(filepath.Join(staterootPath, common.IPCAutoRollbackConfigFile))
 
 	cfgdir := filepath.Dir(cfgfile)
 	if err := os.MkdirAll(cfgdir, 0o700); err != nil {
@@ -305,7 +306,6 @@ func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error 
 		monitorTimeout = ipc.Spec.AutoRollbackOnFailure.InitMonitorTimeoutSeconds
 	}
 
-	// init-monitor enablement from common init-monitor annotation (same as IBU)
 	initMonitorEnabled := true
 	if ipc != nil {
 		if val, exists := ipc.GetAnnotations()[common.AutoRollbackOnFailureInitMonitorAnnotation]; exists {
@@ -315,7 +315,6 @@ func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error 
 		}
 	}
 
-	// ip-config run auto-rollback enablement from IPC-specific annotation
 	ipcRunEnabled := true
 	if ipc != nil {
 		if val, exists := ipc.GetAnnotations()[common.IPCAutoRollbackOnFailureRunAnnotation]; exists {
@@ -365,9 +364,9 @@ func (c *IPCRebootClient) ReadAutoRollbackConfigFile() (*AutoRollbackConfig, err
 
 // DisableInitMonitor stops the transient init-monitor unit for IP config if running.
 func (c *IPCRebootClient) DisableInitMonitor() error {
-	if _, err := c.hostCommandsExecutor.Execute("systemctl", "is-active", common.IPCInitMonitorUnit+".service"); err == nil {
-		if _, err := c.hostCommandsExecutor.Execute("systemctl", "stop", common.IPCInitMonitorUnit+".service"); err != nil {
-			return fmt.Errorf("failed to stop %s: %w", common.IPCInitMonitorUnit+".service", err)
+	if _, err := c.hostCommandsExecutor.Execute("systemctl", "is-active", common.IPCInitMonitorService); err == nil {
+		if _, err := c.hostCommandsExecutor.Execute("systemctl", "stop", common.IPCInitMonitorService); err != nil {
+			return fmt.Errorf("failed to stop %s: %w", common.IPCInitMonitorService, err)
 		}
 	}
 	return nil
@@ -447,10 +446,4 @@ func (c *IPCRebootClient) Reboot(rationale string) error {
 	time.Sleep(defaultRebootTimeout)
 
 	return fmt.Errorf("failed to reboot. This should never happen! Please check the system")
-}
-
-// Export a copy of the IPConfig to the current stateroot for uncontrolled rollback restoration.
-func ExportIPConfigForUncontrolledRollback(ipc any) error { // keep for parity; not used in this flow
-	filePath := common.PathOutsideChroot(utils.IPCFilePath)
-	return lcautils.MarshalToFile(ipc, filePath)
 }

@@ -19,12 +19,15 @@ package ipconfigcmd
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
 	"github.com/go-logr/logr"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -34,6 +37,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	intOstree "github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
+	lcacli "github.com/openshift-kni/lifecycle-agent/lca-cli"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ipconfig"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
@@ -43,8 +47,9 @@ import (
 var (
 	ipPrepareScheme = runtime.NewScheme()
 
-	newIPv4 string
-	newIPv6 string
+	newIPv4            string
+	newIPv6            string
+	installInitMonitor bool
 )
 
 func init() {
@@ -53,6 +58,12 @@ func init() {
 
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv4, "ipv4-address", "", "New IPv4 address")
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv6, "ipv6-address", "", "New IPv6 address")
+	ipConfigPrepareCmd.Flags().BoolVar(
+		&installInitMonitor,
+		"install-init-monitor",
+		false,
+		"Install init monitor service in the new stateroot",
+	)
 }
 
 var ipConfigPrepareCmd = &cobra.Command{
@@ -100,7 +111,8 @@ func runIPConfigPrepare() error {
 		return fmt.Errorf("failed to write initial prepare status: %w", err)
 	}
 
-	if err := preparer.RunPrepare(context.Background(), newIPv4, newIPv6); err != nil {
+	ctx := context.Background()
+	if err := preparer.RunPrepare(ctx, newIPv4, newIPv6); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigPrepareStatusFile,
 			common.IPConfigPhaseFailed,
@@ -112,10 +124,14 @@ func runIPConfigPrepare() error {
 		return err
 	}
 
-	newStaterootName, err := ipconfig.BuildStaterootName(newIPv4, newIPv6)
-	if err != nil {
-		return fmt.Errorf("failed to build stateroot name: %w", err)
+	newStaterootName := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
+	if installInitMonitor {
+		err := installMonitorInitializationServiceInNewStateroot(ostreeClient, opsInterface, newStaterootName, pkgLog)
+		if err != nil {
+			return fmt.Errorf("failed to install monitor initialization service: %w", err)
+		}
 	}
+
 	staterootPath := common.GetStaterootPath(newStaterootName)
 	statusFilePath := filepath.Join(staterootPath, common.IPConfigPrepareStatusFile)
 	if err := common.FinalizeIPConfigStatus(
@@ -138,5 +154,47 @@ func runIPConfigPrepare() error {
 		return fmt.Errorf("failed to reboot to new stateroot: %w", err)
 	}
 
+	return nil
+}
+
+// installMonitorInitializationServiceInNewStateroot installs and enables the IPC init monitor service
+// within the new stateroot deployment. The auto-rollback configuration file should be written
+// by the caller (controller) beforehand.
+func installMonitorInitializationServiceInNewStateroot(
+	ostree intOstree.IClient,
+	ops ops.Ops,
+	newStaterootName string,
+	logger *logrus.Logger,
+) error {
+	common.OstreeDeployPathPrefix = "/sysroot"
+	deploymentDir, err := ostree.GetDeploymentDir(newStaterootName)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment dir for %s: %w", newStaterootName, err)
+	}
+
+	initMonitorServiceFile, err := fs.ReadFile(lcacli.InstallationConfigurationServices, common.IPCInitMonitorService)
+	if err != nil {
+		return fmt.Errorf("failed to read init monitor service file: %w", err)
+	}
+
+	destinationFilePath := filepath.Join(deploymentDir, "etc/systemd/system", common.IPCInitMonitorService)
+	logger.Infof("Creating service %s", common.IPCInitMonitorService)
+
+	if err := os.MkdirAll(path.Dir(destinationFilePath), 0o755); err != nil {
+		return fmt.Errorf("failed to create destination directory for %s: %w", common.IPCInitMonitorService, err)
+	}
+	if err := os.WriteFile(destinationFilePath, initMonitorServiceFile, 0o644); err != nil {
+		return fmt.Errorf("failed to write init monitor service file: %w", err)
+	}
+
+	logger.Infof("Enabling service %s", common.IPCInitMonitorService)
+	if _, err := ops.SystemctlAction(
+		"enable",
+		"--root",
+		deploymentDir,
+		common.IPCInitMonitorService,
+	); err != nil {
+		return fmt.Errorf("failed enabling service %s: %w", common.IPCInitMonitorService, err)
+	}
 	return nil
 }

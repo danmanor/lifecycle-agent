@@ -9,10 +9,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -31,6 +31,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
+	lcautils "github.com/openshift-kni/lifecycle-agent/utils"
 	"github.com/samber/lo"
 )
 
@@ -40,6 +41,7 @@ import (
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get
+//+kubebuilder:rbac:groups=config.openshift.io,resources=proxies,verbs=get;list;watch
 
 // IPConfigReconciler reconciles an IPConfig object
 type IPConfigReconciler struct {
@@ -76,9 +78,9 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		"namespace", req.NamespacedName.Namespace,
 	)
 
-	ipc, err := r.getOrCreateIPConfig(ctx)
+	ipc, err := r.getIPConfig(ctx, logger)
 	if err != nil {
-		return requeueWithError(fmt.Errorf("failed to get or create IPConfig: %w", err))
+		return requeueWithError(fmt.Errorf("failed to get IPConfig: %w", err))
 	}
 	ipc.Status.ObservedGeneration = ipc.Generation
 
@@ -116,8 +118,13 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if err := r.refreshHostAndClusterNetwork(ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to refresh host/cluster network: %w", err))
 	}
+
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
+	if err := r.cacheRecertImageIfNeeded(ctx, ipc, logger); err != nil {
+		logger.Error(err, "recert image caching failed")
 	}
 
 	annotations := ipc.GetAnnotations()
@@ -202,19 +209,16 @@ func isTargetStaterootBooted(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclien
 // buildIPConfigStaterootName mirrors the lca-cli ip-config prepare naming scheme: rhcos_<ipv4>_<ipv6>
 // where IPs are sanitized to alphanumeric and dashes, and IPv6 brackets are stripped.
 func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
-	parts := []string{"rhcos"}
-	if v := ipc.Spec.IPv4; v != nil && v.Address != "" {
-		parts = append(parts, common.SanitizeForOsname(strings.Split(v.Address, "/")[0]))
+	var ipv4, ipv6 string
+	if ipc.Spec.IPv4 != nil {
+		ipv4 = ipc.Spec.IPv4.Address
 	}
-	if v := ipc.Spec.IPv6; v != nil && v.Address != "" {
-		addr := strings.Split(v.Address, "/")[0]
-		addr = strings.Trim(addr, "[]")
-		parts = append(parts, common.SanitizeForOsname(addr))
+
+	if ipc.Spec.IPv6 != nil {
+		ipv6 = ipc.Spec.IPv6.Address
 	}
-	if len(parts) == 1 {
-		return ""
-	}
-	return strings.Join(parts, "_")
+
+	return common.BuildNewStaterootNameFromIps(ipv4, ipv6)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -245,32 +249,45 @@ func (r *IPConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return false },
+			DeleteFunc: func(de event.DeleteEvent) bool {
+				if de.Object.GetName() == common.IPConfigName {
+					ipc := de.Object.(*ipcv1.IPConfig)
+					filePath := common.PathOutsideChroot(controllerutils.IPCFilePath)
+					if controllerutils.IsIPStageCompleted(ipc, ipcv1.IPStages.Idle) ||
+						controllerutils.IsIPStageFailed(ipc, ipcv1.IPStages.Rollback) {
+						if err := os.Remove(filePath); err != nil {
+							if !os.IsNotExist(err) {
+								fmt.Printf("Failed to remove IPConfig from %s: %v", filePath, err)
+							}
+						}
+					} else {
+						if err := lcautils.MarshalToFile(de.Object, filePath); err != nil {
+							fmt.Printf("Failed to save deleted IPConfig to %s: %v", filePath, err)
+						}
+					}
+					return true
+				}
+				return false
+			},
 		})).
 		Complete(r)
 }
 
-func (r *IPConfigReconciler) getOrCreateIPConfig(ctx context.Context) (*ipcv1.IPConfig, error) {
+// getIPConfig tries to get the IPConfig CR by performing the following operations in order:
+//   - Fetching from the API from the non-cached client or initializes it if it doesn't exist.
+//   - If the latter fails, it attempts to restore the IPConfig CR from the file system.
+//   - If the restoration fails, it creates a new IPConfig CR.
+func (r *IPConfigReconciler) getIPConfig(ctx context.Context, logger logr.Logger) (*ipcv1.IPConfig, error) {
 	ipc := &ipcv1.IPConfig{}
 	if err := r.NoncachedClient.Get(ctx, client.ObjectKey{Name: common.IPConfigName}, ipc); err != nil {
-		if !errors.IsNotFound(err) {
-			return nil, fmt.Errorf("failed to get IPConfig: %w", err)
+		if errors.IsNotFound(err) {
+			if initErr := lcautils.InitIPConfig(ctx, r.Client, &logger); initErr != nil {
+				return nil, fmt.Errorf("failed to initialize IPConfig: %w", initErr)
+			}
+			return ipc, nil
 		}
-
-		ipc = &ipcv1.IPConfig{
-			ObjectMeta: metav1.ObjectMeta{Name: common.IPConfigName},
-			Spec:       ipcv1.IPConfigSpec{Stage: ipcv1.IPStages.Idle},
-		}
-
-		if createErr := r.Client.Create(ctx, ipc); createErr != nil {
-			return nil, fmt.Errorf("failed to create IPConfig: %w", createErr)
-		}
-
-		if getErr := r.NoncachedClient.Get(ctx, client.ObjectKey{Name: common.IPConfigName}, ipc); getErr != nil {
-			return nil, fmt.Errorf("failed to get IPConfig after creation: %w", getErr)
-		}
+		return nil, fmt.Errorf("failed to get IPConfig: %w", err)
 	}
-
 	return ipc, nil
 }
 
@@ -278,6 +295,76 @@ func validateIPConfigStage(ipc *ipcv1.IPConfig) error {
 	if !lo.Contains(ipc.Status.ValidNextStages, ipc.Spec.Stage) {
 		return fmt.Errorf("invalid IPConfig stage: %s", ipc.Spec.Stage)
 	}
+
+	return nil
+}
+
+// cacheRecertImageIfNeeded pulls and caches the recert image if it hasn't been cached yet.
+// If the annotation is not provided, it resolves the image via getRecertImage.
+func (r *IPConfigReconciler) cacheRecertImageIfNeeded(ctx context.Context, ipc *ipcv1.IPConfig, logger logr.Logger) error {
+	annotations := ipc.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	image := annotations[controllerutils.RecertImageAnnotation]
+	if image == "" {
+		image = getRecertImage(ipc)
+	}
+
+	if cached := annotations[controllerutils.RecertCachedImageAnnotation]; cached == image {
+		return nil
+	}
+
+	authFile := common.ImageRegistryAuthFile
+	if name := annotations[controllerutils.RecertPullSecretAnnotation]; name != "" {
+		pullSecret, err := lcautils.GetSecretData(
+			ctx,
+			name,
+			common.LcaNamespace,
+			corev1.DockerConfigJsonKey,
+			r.Client,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to get pull-secret with the name %s in namespace %s holding the key %s: %w",
+				name,
+				common.LcaNamespace,
+				corev1.DockerConfigJsonKey,
+				err,
+			)
+		}
+
+		tempFile, err := os.CreateTemp(os.TempDir(), "recert-pull-secret.json")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file: %w", err)
+		}
+		defer os.Remove(tempFile.Name())
+
+		if _, err := tempFile.WriteString(pullSecret); err != nil {
+			return fmt.Errorf("failed to write pull secret to temp file: %w", err)
+		}
+		tempFile.Close()
+		authFile = tempFile.Name()
+	}
+
+	if _, err := r.ChrootOps.RunBashInHostNamespace(
+		"podman",
+		"pull",
+		"--authfile",
+		authFile,
+		image,
+	); err != nil {
+		return fmt.Errorf("failed to pull recert image %s: %w", image, err)
+	}
+
+	annotations[controllerutils.RecertCachedImageAnnotation] = image
+	ipc.SetAnnotations(annotations)
+	if err := r.Client.Update(ctx, ipc); err != nil {
+		return fmt.Errorf("failed to update annotations after caching recert image: %w", err)
+	}
+
+	logger.Info("recert image cached on host", "image", image)
 
 	return nil
 }

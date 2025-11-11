@@ -41,6 +41,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ipconfig"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
+	ocp_config_v1 "github.com/openshift/api/config/v1"
 	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
 
@@ -55,9 +56,6 @@ var (
 	ipv6Gateway        string
 	ipv4DNS            string
 	ipv6DNS            string
-	httpProxy          string
-	httpsProxy         string
-	noProxy            string
 	pullSecretRefName  string
 	recertImage        string
 )
@@ -70,6 +68,7 @@ const (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(ipConfigScheme))
 	utilruntime.Must(machineconfigv1.AddToScheme(ipConfigScheme))
+	utilruntime.Must(ocp_config_v1.AddToScheme(ipConfigScheme))
 
 	ipConfigRunCmd.Flags().StringVar(&ipv4Address, "ipv4-address", "", "Target IPv4 address")
 	ipConfigRunCmd.Flags().StringVar(&ipv4MachineNetwork, "ipv4-machine-network", "", "Target IPv4 machine network CIDR")
@@ -79,9 +78,6 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&ipv6Gateway, "ipv6-gateway", "", "IPv6 default gateway")
 	ipConfigRunCmd.Flags().StringVar(&ipv4DNS, "ipv4-dns", "", "IPv4 DNS server")
 	ipConfigRunCmd.Flags().StringVar(&ipv6DNS, "ipv6-dns", "", "IPv6 DNS server")
-	ipConfigRunCmd.Flags().StringVar(&httpProxy, "http-proxy", "", "HTTP proxy to use for network operations")
-	ipConfigRunCmd.Flags().StringVar(&httpsProxy, "https-proxy", "", "HTTPS proxy to use for network operations")
-	ipConfigRunCmd.Flags().StringVar(&noProxy, "no-proxy", "", "Comma-separated list of hosts that should bypass the proxy")
 	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, "pull-secret-ref-name", "", "The name of the pull secret to use for the recert container tool")
 }
@@ -118,9 +114,6 @@ func runIPConfigChange() error {
 			ipv6Gateway = cfg.IPv6Gateway
 			ipv4DNS = cfg.IPv4DNSServer
 			ipv6DNS = cfg.IPv6DNSServer
-			httpProxy = cfg.HTTPProxy
-			httpsProxy = cfg.HTTPSProxy
-			noProxy = cfg.NoProxy
 			pullSecretRefName = cfg.PullSecretRefName
 			recertImage = cfg.RecertImage
 		} else {
@@ -186,7 +179,6 @@ func runIPConfigChange() error {
 		recertImage,
 		common.LCAWorkspaceDir,
 		ipConfigs,
-		&ipconfig.ProxyConfig{HTTPProxy: httpProxy, HTTPSProxy: httpsProxy, NoProxy: noProxy},
 		pullSecretFile,
 	)
 
@@ -194,7 +186,7 @@ func runIPConfigChange() error {
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
 	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
-	if err = ipConfigHandler.RunIPConfigChange(); err != nil {
+	if err := ipConfigHandler.RunIPConfigChange(); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRunStatusFile,
 			common.IPConfigPhaseFailed,
@@ -203,6 +195,8 @@ func runIPConfigChange() error {
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config run status: %w", internalErr)
 		}
+
+		return fmt.Errorf("failed to run IP config: %w", err)
 	}
 
 	if err := common.FinalizeIPConfigStatus(

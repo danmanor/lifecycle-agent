@@ -18,7 +18,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
+	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/initmonitor"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	"github.com/spf13/cobra"
@@ -53,6 +56,13 @@ func init() {
 func initMonitor() error {
 	var hostCommandsExecutor ops.Execute
 	hostCommandsExecutor = ops.NewRegularExecutor(log, true)
+
+	if data, err := os.ReadFile(common.PathOutsideChroot(common.InitMonitorModeFile)); err == nil {
+		if val := strings.TrimSpace(string(data)); val != "" {
+			monitorMode = val
+			log.Infof("init-monitor mode set from file: %s", monitorMode)
+		}
+	}
 
 	initMonitorRunner := initmonitor.NewInitMonitor(scheme, log, hostCommandsExecutor, ops.NewOps(log, hostCommandsExecutor), monitorSvcUnitComponentTag, monitorMode)
 	if launchMonitor {

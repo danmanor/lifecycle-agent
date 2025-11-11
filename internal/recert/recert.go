@@ -85,6 +85,14 @@ func FormatRecertProxyFromSeedReconfigProxy(proxy, statusProxy *seedreconfig.Pro
 	)
 }
 
+// FormatRecertProxyFromIPConfig formats proxy values from IPConfig (spec and status) to a single recert proxy string.
+func FormatRecertProxyFromIPConfig(specHTTP, specHTTPS, specNo, statusHTTP, statusHTTPS, statusNo string) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+		specHTTP, specHTTPS, specNo,
+		statusHTTP, statusHTTPS, statusNo,
+	)
+}
+
 func SetRecertTrustedCaBundleFromSeedReconfigAdditionaTrustBundle(recertConfig *RecertConfig, additionalTrustBundle seedreconfig.AdditionalTrustBundle) error {
 	if additionalTrustBundle.UserCaBundle != "" {
 		recertConfig.UserCaBundle = additionalTrustBundle.UserCaBundle
@@ -279,6 +287,12 @@ func CreateRecertConfigFileForIPConfig(
 	cryptoDir string,
 	ingressCertificateCN string,
 	recertConfigFolder string,
+	specHTTPProxy string,
+	specHTTPSProxy string,
+	specNoProxy string,
+	statusHTTPProxy string,
+	statusHTTPSProxy string,
+	statusNoProxy string,
 ) error {
 	if len(oldIPs) != len(newIPs) {
 		return fmt.Errorf("oldIPs and newIPs must have the same length")
@@ -290,6 +304,18 @@ func CreateRecertConfigFileForIPConfig(
 	config.ExtendExpiration = true
 	config.InstallConfig = installConfig
 	config.SummaryFileClean = "/var/tmp/recert-summary.yaml"
+
+	if specHTTPProxy != "" &&
+		specHTTPSProxy != "" &&
+		specNoProxy != "" &&
+		statusHTTPProxy != "" &&
+		statusHTTPSProxy != "" &&
+		statusNoProxy != "" {
+		config.Proxy = FormatRecertProxyFromIPConfig(
+			specHTTPProxy, specHTTPSProxy, specNoProxy,
+			statusHTTPProxy, statusHTTPSProxy, statusNoProxy,
+		)
+	}
 
 	for i := range newIPs {
 		config.CNSanReplaceRules = append(

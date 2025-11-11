@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,9 +13,11 @@ import (
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
+	"github.com/openshift-kni/lifecycle-agent/internal/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/internal/reboot"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
+	"github.com/openshift-kni/lifecycle-agent/utils"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +40,7 @@ type IPConfigConfigPhasesHandler struct {
 	Client          client.Client
 	NoncachedClient client.Reader
 	RPMOstreeClient rpmostreeclient.IClient
+	OstreeClient    ostreeclient.IClient
 	ChrootOps       ops.Ops
 	RebootClient    reboot.RebootIntf
 }
@@ -45,6 +49,7 @@ func NewIPConfigConfigPhasesHandler(
 	client client.Client,
 	noncachedClient client.Reader,
 	rpmostreeClient rpmostreeclient.IClient,
+	ostreeClient ostreeclient.IClient,
 	chrootOps ops.Ops,
 	rebootClient reboot.RebootIntf,
 ) IPConfigConfigPhasesHandlerInterface {
@@ -52,6 +57,7 @@ func NewIPConfigConfigPhasesHandler(
 		Client:          client,
 		NoncachedClient: noncachedClient,
 		RPMOstreeClient: rpmostreeClient,
+		OstreeClient:    ostreeClient,
 		ChrootOps:       chrootOps,
 		RebootClient:    rebootClient,
 	}
@@ -301,7 +307,21 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
 	}
 
-	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr); err != nil {
+	newStaterootName := buildIPConfigStaterootName(ipc)
+	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc, newStaterootName); err != nil {
+		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config auto-rollback config: %s", err.Error()))
+		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+		}
+		return requeueWithError(fmt.Errorf("failed to write ip-config auto-rollback config: %w", err))
+	}
+
+	monitorEnabled := true
+	if ipc.GetAnnotations()[common.AutoRollbackOnFailureInitMonitorAnnotation] == common.AutoRollbackDisableValue {
+		monitorEnabled = false
+	}
+
+	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr, monitorEnabled); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config prepare: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -334,15 +354,15 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	if err := h.startIPConfigInitMonitor(ipc, logger); err != nil {
+	if err := h.enableInitMonitorService(); err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
-			fmt.Sprintf("failed to start ip-config init monitor: %s", err.Error()),
+			fmt.Sprintf("failed to stop init monitor service: %s", err.Error()),
 		)
 		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
-		return requeueWithError(fmt.Errorf("failed to start ip-config init monitor: %w", err))
+		return requeueWithError(fmt.Errorf("failed to stop init monitor service: %w", err))
 	}
 
 	if err := h.writeIPConfigRunConfig(ipc); err != nil {
@@ -372,6 +392,17 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 	// We shouldn't reach here on successful ip-config run
 
 	return doNotRequeue(), nil
+}
+
+// enableInitMonitorService enables the init monitor service in the new stateroot.
+// the init monitor service is disabling itself upon finishing its work, but we need to reset it
+// for the next reboot.
+func (h *IPConfigConfigPhasesHandler) enableInitMonitorService() error {
+	if _, err := h.ChrootOps.SystemctlAction("enable", common.IPCInitMonitorService); err != nil {
+		return fmt.Errorf("failed to enable init monitor service: %w", err)
+	}
+
+	return nil
 }
 
 func (h *IPConfigConfigPhasesHandler) PostConfiguration(
@@ -423,6 +454,17 @@ func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 		return requeueWithError(fmt.Errorf("failed to disable init monitor: %w", err))
 	}
 
+	if err := h.disableNodeipRerunUnit(); err != nil {
+		controllerutils.SetIPConfigStatusFailed(
+			ipc,
+			fmt.Sprintf("failed to disable %s: %s", utils.NodeipRerunUnitPath, err.Error()),
+		)
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+		return requeueWithError(fmt.Errorf("failed to disable %s: %w", utils.NodeipRerunUnitPath, err))
+	}
+
 	controllerutils.StopIPPhase(h.Client, logger, ipc, IPConfigPhasePostConfiguration)
 	controllerutils.StopIPStageHistory(h.Client, logger, ipc)
 	controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed successfully")
@@ -433,6 +475,14 @@ func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 	logger.Info("Finished post-configuration phase successfully")
 
 	return doNotRequeue(), nil
+}
+
+// disableNodeipRerunUnit disables the one-shot nodeip rerun systemd unit if present.
+func (h *IPConfigConfigPhasesHandler) disableNodeipRerunUnit() error {
+	if _, err := h.ChrootOps.SystemctlAction("disable", utils.NodeipRerunUnitPath); err != nil {
+		return fmt.Errorf("failed to disable %s: %w", utils.NodeipRerunUnitPath, err)
+	}
+	return nil
 }
 
 // statusIPsMatchSpec validates that all provided network config in spec matches
@@ -662,9 +712,6 @@ func parseCIDR(c string) (string, int, error) {
 	return ipNet.IP.String(), ones, nil
 }
 
-// per-phase handlers for IPConfig run status
-// Reconciler-specific config handlers migrated to IPConfigConfigStageHandler
-
 // writeIPConfigRunConfigToNewStateroot writes the ip-config run configuration file into the new stateroot etc
 func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig) error {
 	cfg := common.IPConfigRunConfig{}
@@ -699,27 +746,13 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 		}
 	}
 
-	if p := ipc.Spec.Proxy; p != nil {
-		if p.HTTPProxy != "" {
-			cfg.HTTPProxy = p.HTTPProxy
-		}
-		if p.HTTPSProxy != "" {
-			cfg.HTTPSProxy = p.HTTPSProxy
-		}
-		if len(p.NoProxy) > 0 {
-			cfg.NoProxy = strings.Join(p.NoProxy, ",")
-		}
-	}
-
 	recertImage := getRecertImage(ipc)
 	if recertImage != "" {
 		cfg.RecertImage = recertImage
 	}
 
-	if ipc.Spec.Recert != nil &&
-		ipc.Spec.Recert.PullSecretRef != nil &&
-		ipc.Spec.Recert.PullSecretRef.Name != "" {
-		cfg.PullSecretRefName = ipc.Spec.Recert.PullSecretRef.Name
+	if v, ok := ipc.GetAnnotations()[controllerutils.RecertPullSecretAnnotation]; ok && v != "" {
+		cfg.PullSecretRefName = v
 	}
 
 	data, err := json.Marshal(cfg)
@@ -731,6 +764,17 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 	}
 
 	return nil
+}
+
+// getRecertImage resolves the recert image to use in priority: annotation, env, default
+func getRecertImage(ipc *ipcv1.IPConfig) string {
+	if v := ipc.GetAnnotations()[controllerutils.RecertImageAnnotation]; v != "" {
+		return v
+	}
+	if v := os.Getenv(common.RecertImageEnvKey); v != "" {
+		return v
+	}
+	return common.DefaultRecertImage
 }
 
 // RunLcaCliIPConfigRun schedules an lca-cli ip-config run via systemd-run.
@@ -753,8 +797,6 @@ func (c *IPConfigConfigPhasesHandler) RunLcaCliIPConfigRun(
 	return nil
 }
 
-// Helpers migrated from prep stage for unified Config flow
-
 func getIPAddresses(ipc *ipcv1.IPConfig) (string, string) {
 	ipv4Addr := ""
 	if ipc.Spec.IPv4 != nil && ipc.Spec.IPv4.Address != "" {
@@ -772,6 +814,7 @@ func runLcaCliIPConfigPrepare(
 	logger logr.Logger,
 	ipv4Addr string,
 	ipv6Addr string,
+	monitorEnabled bool,
 ) error {
 	logger.Info("Scheduling lca-cli ip-config prepare via systemd-run")
 
@@ -780,6 +823,10 @@ func runLcaCliIPConfigPrepare(
 		"--unit", controllerutils.IPConfigPrepareUnit,
 		"--description", controllerutils.IPConfigPrepareDescription,
 		controllerutils.LcaCliBinaryName, "ip-config", "prepare",
+	}
+
+	if monitorEnabled {
+		args = append(args, "--install-init-monitor")
 	}
 
 	if ipv4Addr != "" {
@@ -791,40 +838,6 @@ func runLcaCliIPConfigPrepare(
 
 	if _, err := chrootOps.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
-	}
-	return nil
-}
-
-// startIPConfigInitMonitor writes the auto-rollback config and starts the init-monitor unit post-pivot
-func (c *IPConfigConfigPhasesHandler) startIPConfigInitMonitor(
-	ipc *ipcv1.IPConfig,
-	logger logr.Logger,
-) error {
-	initMonitorDisabled := false
-	if val, exists := ipc.GetAnnotations()[common.AutoRollbackOnFailureInitMonitorAnnotation]; exists {
-		if val == common.AutoRollbackDisableValue {
-			initMonitorDisabled = true
-		}
-	}
-
-	if initMonitorDisabled {
-		logger.Info("IPConfig init monitor disabled via annotation; not starting monitor")
-		return nil
-	}
-
-	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc); err != nil {
-		return fmt.Errorf("failed to write IPConfig auto-rollback config: %w", err)
-	}
-
-	monitorArgs := []string{
-		"--property", controllerutils.SystemdExitTypeCgroup,
-		"--unit", common.IPCInitMonitorUnit,
-		"--description", controllerutils.IPConfigInitMonitorDescription,
-		controllerutils.LcaCliBinaryName, "init-monitor", "--monitor", "--mode", "ipconfig",
-	}
-
-	if _, err := c.ChrootOps.RunSystemdAction(monitorArgs...); err != nil {
-		return fmt.Errorf("failed to start ip-config init monitor: %w", err)
 	}
 	return nil
 }

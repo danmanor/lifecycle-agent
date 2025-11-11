@@ -340,6 +340,7 @@ func main() {
 				mgr.GetClient(),
 				mgr.GetAPIReader(),
 				rpmOstreeClient,
+				ostreeClient,
 				chrootOp,
 				ipcRebootClient,
 			),

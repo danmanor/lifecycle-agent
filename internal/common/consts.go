@@ -81,12 +81,14 @@ const (
 	IPConfigRollbackStatusFile = LCAWorkspaceDir + "/ip-config-rollback-status.json"
 
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
-	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800
+	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800 // 30 minutes
 	IBUInitMonitorService                           = "lca-init-monitor.service"
 	IBUInitMonitorServiceFile                       = "/etc/systemd/system/" + IBUInitMonitorService
 	IPCAutoRollbackConfigFile                       = LCAConfigDir + "/ipconfig_autorollback_config.json"
-	IPCAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800
-	IPCInitMonitorUnit                              = "lca-ipconfig-init-monitor"
+	IPCAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800 // 30 minutes
+	IPCInitMonitorService                           = "lca-init-monitor.service"
+	// InitMonitorModeFile configures which mode the init-monitor should operate in ("ibu" or "ipconfig")
+	InitMonitorModeFile = LCAWorkspaceDir + "/initmonitor_mode"
 	// IPCAutoRollbackOnFailureRunAnnotation configures automatic rollback when the IPConfig run fails.
 	// Only acceptable value is AutoRollbackDisableValue. Any other value is treated as "Enabled".
 	IPCAutoRollbackOnFailureRunAnnotation = "auto-rollback-on-failure.lca.openshift.io/ip-config-run"
