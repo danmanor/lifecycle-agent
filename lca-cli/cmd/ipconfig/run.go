@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -41,6 +42,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ipconfig"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
+	"github.com/openshift-kni/lifecycle-agent/utils"
 	ocp_config_v1 "github.com/openshift/api/config/v1"
 	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
@@ -56,6 +58,7 @@ var (
 	ipv6Gateway        string
 	ipv4DNS            string
 	ipv6DNS            string
+	vlanID             int
 	pullSecretRefName  string
 	recertImage        string
 )
@@ -78,6 +81,7 @@ func init() {
 	ipConfigRunCmd.Flags().StringVar(&ipv6Gateway, "ipv6-gateway", "", "IPv6 default gateway")
 	ipConfigRunCmd.Flags().StringVar(&ipv4DNS, "ipv4-dns", "", "IPv4 DNS server")
 	ipConfigRunCmd.Flags().StringVar(&ipv6DNS, "ipv6-dns", "", "IPv6 DNS server")
+	ipConfigRunCmd.Flags().IntVar(&vlanID, "vlan-id", 0, "Optional VLAN ID to use on the br-ex uplink")
 	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, "pull-secret-ref-name", "", "The name of the pull secret to use for the recert container tool")
 }
@@ -114,6 +118,7 @@ func runIPConfigChange() error {
 			ipv6Gateway = cfg.IPv6Gateway
 			ipv4DNS = cfg.IPv4DNSServer
 			ipv6DNS = cfg.IPv6DNSServer
+			vlanID = cfg.VLANID
 			pullSecretRefName = cfg.PullSecretRefName
 			recertImage = cfg.RecertImage
 		} else {
@@ -127,7 +132,7 @@ func runIPConfigChange() error {
 		return err
 	}
 
-	effectivePrimary, err := inferPrimaryStack(ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork)
+	effectivePrimary, err := inferPrimaryStack()
 	if err != nil {
 		return err
 	}
@@ -180,6 +185,7 @@ func runIPConfigChange() error {
 		common.LCAWorkspaceDir,
 		ipConfigs,
 		pullSecretFile,
+		vlanID,
 	)
 
 	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-run", hostCommandsExecutor)
@@ -291,25 +297,31 @@ func validateIPConfigArgs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) error {
 	return nil
 }
 
-// inferPrimaryStack determines the effective primary stack based on provided inputs.
-// Rules:
-// - IPv4-only => ipv4
-// - IPv6-only => ipv6
-// - Dual-stack => default ipv4
-func inferPrimaryStack(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) (string, error) {
-	ipv4Both := ipv4Addr != "" && ipv4Net != ""
-	ipv6Both := ipv6Addr != "" && ipv6Net != ""
-
-	switch {
-	case ipv4Both && !ipv6Both:
-		return ipFamilyIPv4, nil
-	case ipv6Both && !ipv4Both:
-		return ipFamilyIPv6, nil
-	case ipv4Both && ipv6Both:
-		return ipFamilyIPv4, nil
-	default:
-		return "", fmt.Errorf("at least one of IPv4 or IPv6 must be provided")
+func inferPrimaryStack() (string, error) {
+	data, err := os.ReadFile(utils.PrimaryIPPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read primary IP: %w", err)
 	}
+
+	primaryIP := strings.TrimSpace(string(data))
+	if primaryIP == "" {
+		return "", fmt.Errorf("primary IP not found")
+	}
+
+	ip := net.ParseIP(primaryIP)
+	if ip == nil {
+		return "", fmt.Errorf("invalid primary IP: %s", primaryIP)
+	}
+
+	if ip.To4() != nil {
+		return ipFamilyIPv4, nil
+	}
+
+	if ip.To16() != nil {
+		return ipFamilyIPv6, nil
+	}
+
+	return "", fmt.Errorf("invalid primary IP: %s", primaryIP)
 }
 
 // buildIPConfigs creates the ordered slice of NetworkIPConfig with primary first.
@@ -340,5 +352,6 @@ func buildIPConfigs(
 			ipConfigs = append(ipConfigs, ipv4Config)
 		}
 	}
+
 	return ipConfigs
 }

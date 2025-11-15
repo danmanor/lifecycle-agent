@@ -6,6 +6,18 @@ interfaces:
     enabled: false
   ipv6:
     enabled: false
+{{- if gt .VLANID 0 }}
+- name: {{ .VLANIfaceName }}
+  type: vlan
+  state: up
+  vlan:
+    id: {{ .VLANID }}
+    base-iface: {{ .InterfaceName }}
+  ipv4:
+    enabled: false
+  ipv6:
+    enabled: false
+{{- end }}
 - name: br-ex
   type: ovs-bridge
   state: up
@@ -19,7 +31,7 @@ interfaces:
     options:
       mcast-snooping-enable: true
     port:
-    - name: {{ .InterfaceName }}
+    - name: {{ .VLANIfaceName }}
     - name: br-ex
 - name: br-ex
   type: ovs-interface

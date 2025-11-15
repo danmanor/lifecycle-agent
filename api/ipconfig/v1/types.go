@@ -74,13 +74,13 @@ type IPFamilyConfig struct {
 	// Address is the full address with prefix length (e.g., 192.0.2.10/24)
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Address string `json:"address,omitempty"`
-	// Gateway is the default gateway address
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	Gateway string `json:"gateway,omitempty"`
 	// +kubebuilder:validation:Required
 	// MachineNetwork is the CIDR of the machine network (e.g., 192.0.2.0/24)
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	MachineNetwork string `json:"machineNetwork,omitempty"`
+	// Gateway is the default gateway address
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	Gateway string `json:"gateway,omitempty"`
 	// DNSServer is the DNS server IP to use
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	DNSServer string `json:"dnsServer,omitempty"`
@@ -89,15 +89,9 @@ type IPFamilyConfig struct {
 // VLANConfig represents optional VLAN configuration for the detected br-ex path
 type VLANConfig struct {
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:number"}
 	ID int `json:"id,omitempty"`
-}
-
-type PullSecretRef struct {
-	// +kubebuilder:validation:Required
-	// +required
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
-	Name string `json:"name"`
 }
 
 // IPConfigSpec defines the desired state of IPConfig
@@ -156,10 +150,21 @@ type IPConfigStatus struct {
 	History []*IPHistory `json:"history,omitempty"`
 }
 
+type HostIPStatus struct {
+	// DNSServer is the DNS server IP to use
+	DNSServer string `json:"dnsServer,omitempty"`
+	// Gateway is the default gateway address
+	Gateway string `json:"gateway,omitempty"`
+}
+
 // HostNetworkStatus summarizes current host network
 type HostNetworkStatus struct {
-	IPv4 *IPFamilyConfig `json:"ipv4,omitempty"`
-	IPv6 *IPFamilyConfig `json:"ipv6,omitempty"`
+	// IPv4 summarizes the current IPv4 on the host network
+	IPv4 *HostIPStatus `json:"ipv4,omitempty"`
+	// IPv6 summarizes the current IPv6 on the host network
+	IPv6 *HostIPStatus `json:"ipv6,omitempty"`
+	// VLANID is the VLAN identifier on the br-ex uplink path, if any
+	VLANID int `json:"vlanId,omitempty"`
 }
 
 // ClusterNetworkStatus summarizes cluster network using lists of strings

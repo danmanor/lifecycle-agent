@@ -115,7 +115,7 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
-	if err := r.refreshHostAndClusterNetwork(ipc); err != nil {
+	if err := r.refreshHostAndClusterNetwork(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to refresh host/cluster network: %w", err))
 	}
 
@@ -390,10 +390,12 @@ type nmIPConf struct {
 }
 
 type nmIf struct {
-	Name string   `json:"name"`
-	Type string   `json:"type"`
-	IPv4 nmIPConf `json:"ipv4"`
-	IPv6 nmIPConf `json:"ipv6"`
+	Name   string   `json:"name"`
+	Type   string   `json:"type"`
+	IPv4   nmIPConf `json:"ipv4"`
+	IPv6   nmIPConf `json:"ipv6"`
+	Bridge nmBridge `json:"bridge,omitempty"`
+	VLAN   *nmVLAN  `json:"vlan,omitempty"`
 }
 
 type nmRoute struct {
@@ -422,8 +424,19 @@ type nmState struct {
 	DNSResolver nmDNS    `json:"dns-resolver"`
 }
 
+type nmBridge struct {
+	Port []struct {
+		Name string `json:"name"`
+	} `json:"port"`
+}
+
+type nmVLAN struct {
+	BaseIface string `json:"base-iface"`
+	ID        int    `json:"id"`
+}
+
 // refreshHostAndClusterNetwork orchestrates nmstate collection and status population
-func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ipc *ipcv1.IPConfig) error {
+func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ctx context.Context, ipc *ipcv1.IPConfig) error {
 	output, err := r.nmstateShowJSON()
 	if err != nil {
 		return err
@@ -434,27 +447,30 @@ func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ipc *ipcv1.IPConfig) e
 		return err
 	}
 
-	br := pickBrExInterface(state)
 	dnsV4, dnsV6 := extractDNS(state)
 	gw4, gw6 := findDefaultGateways(state)
+	vlanID, err := extractBrExVLANID(state)
+	if err != nil {
+		return err
+	}
 
-	nodeIPs, err := r.findNodeIPs(context.TODO())
+	nodeIPs, err := r.findNodeIPs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to find node IPs: %w", err)
 	}
-	machineCIDRs, err := r.findMachineNetworks(context.TODO())
+	machineCIDRs, err := r.findMachineNetworks(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to find machine networks: %w", err)
 	}
 
 	host, cluster := buildHostAndCluster(
-		br,
 		gw4,
 		gw6,
 		dnsV4,
 		dnsV6,
 		nodeIPs,
 		machineCIDRs,
+		lo.FromPtr(vlanID),
 	)
 
 	if ipc.Status.Network == nil {
@@ -553,17 +569,6 @@ func parseNmstate(output string) (nmState, error) {
 	return state, nil
 }
 
-func pickBrExInterface(state nmState) nmIf {
-	var chosen nmIf
-	for _, i := range state.Interfaces {
-		if i.Name == controllerutils.BridgeExternalName && i.Type == controllerutils.OvsInterfaceType {
-			chosen = i
-			break
-		}
-	}
-	return chosen
-}
-
 func extractDNS(state nmState) (string, string) {
 	dnsServers := state.DNSResolver.Running.Server
 	if len(dnsServers) == 0 {
@@ -621,35 +626,16 @@ func toCIDR(ip string, prefix int) string {
 }
 
 func buildHostAndCluster(
-	br nmIf,
 	gw4 string,
 	gw6 string,
 	dnsV4 string,
 	dnsV6 string,
 	nodeIPs []string,
 	machineCIDRs []string,
+	vlanID int,
 ) (*ipcv1.HostNetworkStatus, *ipcv1.ClusterNetworkStatus) {
 	host := &ipcv1.HostNetworkStatus{}
 	cluster := &ipcv1.ClusterNetworkStatus{}
-
-	if len(br.IPv4.Address) > 0 {
-		ip := br.IPv4.Address[0]
-		host.IPv4 = &ipcv1.IPFamilyConfig{
-			Address:        fmt.Sprintf("%s/%d", ip.IP, ip.PrefixLength),
-			Gateway:        gw4,
-			MachineNetwork: toCIDR(ip.IP, ip.PrefixLength),
-			DNSServer:      dnsV4,
-		}
-	}
-	if len(br.IPv6.Address) > 0 {
-		ip := br.IPv6.Address[0]
-		host.IPv6 = &ipcv1.IPFamilyConfig{
-			Address:        fmt.Sprintf("%s/%d", ip.IP, ip.PrefixLength),
-			Gateway:        gw6,
-			MachineNetwork: toCIDR(ip.IP, ip.PrefixLength),
-			DNSServer:      dnsV6,
-		}
-	}
 
 	var nodeIPv4, nodeIPv6 string
 	for _, ip := range nodeIPs {
@@ -677,6 +663,18 @@ func buildHostAndCluster(
 		}
 	}
 
+	host.IPv4 = &ipcv1.HostIPStatus{
+		Gateway:   gw4,
+		DNSServer: dnsV4,
+	}
+
+	host.IPv6 = &ipcv1.HostIPStatus{
+		Gateway:   gw6,
+		DNSServer: dnsV6,
+	}
+
+	host.VLANID = vlanID
+
 	return host, cluster
 }
 
@@ -701,4 +699,35 @@ func findMatchingCIDR(ipStr string, cidrs []string) string {
 		}
 	}
 	return ""
+}
+
+// extractBrExUplinkName returns the uplink port name connected to br-ex (excluding the br-ex internal and patch ports)
+func extractBrExUplinkName(state nmState) (*string, error) {
+	for _, intf := range state.Interfaces {
+		if intf.Name == controllerutils.BridgeExternalName && intf.Type == "ovs-bridge" {
+			for _, p := range intf.Bridge.Port {
+				if !strings.Contains(p.Name, controllerutils.BridgeExternalName) && p.Name != "" {
+					return &p.Name, nil
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("br-ex uplink port not found")
+}
+
+// extractBrExVLANID inspects the br-ex uplink port; if it's a VLAN interface, returns its VLAN ID.
+func extractBrExVLANID(state nmState) (*int, error) {
+	uplink, err := extractBrExUplinkName(state)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, intf := range state.Interfaces {
+		if intf.Name == lo.FromPtr(uplink) && intf.Type == "vlan" && intf.VLAN != nil {
+			return &intf.VLAN.ID, nil
+		}
+	}
+
+	return nil, fmt.Errorf("br-ex uplink VLAN ID not found")
 }

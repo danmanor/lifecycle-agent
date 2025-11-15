@@ -79,12 +79,12 @@ const (
 	IPConfigRunStatusFile      = LCAWorkspaceDir + "/ip-config-run-status.json"
 	IPConfigPrepareStatusFile  = LCAWorkspaceDir + "/ip-config-prepare-status.json"
 	IPConfigRollbackStatusFile = LCAWorkspaceDir + "/ip-config-rollback-status.json"
+	IPCAutoRollbackConfigFile  = LCAWorkspaceDir + "/ipconfig_autorollback_config.json"
 
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800 // 30 minutes
 	IBUInitMonitorService                           = "lca-init-monitor.service"
 	IBUInitMonitorServiceFile                       = "/etc/systemd/system/" + IBUInitMonitorService
-	IPCAutoRollbackConfigFile                       = LCAConfigDir + "/ipconfig_autorollback_config.json"
 	IPCAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800 // 30 minutes
 	IPCInitMonitorService                           = "lca-init-monitor.service"
 	// InitMonitorModeFile configures which mode the init-monitor should operate in ("ibu" or "ipconfig")

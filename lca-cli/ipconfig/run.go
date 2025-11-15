@@ -44,6 +44,7 @@ type IPConfigHandler struct {
 	IPConfigs      []*NetworkIPConfig
 	runtimeClient  runtimeclient.Client
 	PullSecretFile string
+	VLANID         int
 }
 
 // NewIPConfig creates a new IPConfig instance
@@ -56,6 +57,7 @@ func NewIPConfig(
 	workingDir string,
 	ipConfigs []*NetworkIPConfig,
 	pullSecretFile string,
+	vlanID int,
 ) *IPConfigHandler {
 	return &IPConfigHandler{
 		log:            log,
@@ -66,6 +68,7 @@ func NewIPConfig(
 		runtimeClient:  runtimeClient,
 		IPConfigs:      ipConfigs,
 		PullSecretFile: pullSecretFile,
+		VLANID:         vlanID,
 	}
 }
 
@@ -462,28 +465,19 @@ func (i *IPConfigHandler) createMachineConfig(interfaceName string) (*machinecon
 		ipv6Gw,
 		ipv4DNS,
 		ipv6DNS,
+		i.VLANID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate NMState config: %w", err)
 	}
 
 	encodedContent := base64.StdEncoding.EncodeToString([]byte(nmstateConfig))
-	ignitionConfig := fmt.Sprintf(`{
-		"ignition": {
-			"version": "3.2.0"
-		},
-		"storage": {
-			"files": [
-				{
-					"path": "/etc/nmstate/openshift/cluster.yml",
-					"mode": 420,
-					"contents": {
-						"source": "data:text/plain;charset=utf-8;base64,%s"
-					}
-				}
-			]
-		}
-	}`, encodedContent)
+	ignitionConfig, err := utils.GenerateIgnitionNMState(&utils.IgnitionNMStateTemplateData{
+		EncodedContent: encodedContent,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ignition config: %w", err)
+	}
 
 	mc := &machineconfigv1.MachineConfig{
 		ObjectMeta: metav1.ObjectMeta{

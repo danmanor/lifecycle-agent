@@ -28,6 +28,8 @@ import (
 // NMStateConfig represents the configuration for generating NMState YAML
 type NMStateConfig struct {
 	InterfaceName string
+	VLAN          bool
+	VLANID        int
 	IPv4Config    *IPConfig
 	IPv6Config    *IPConfig
 }
@@ -45,6 +47,8 @@ type IPConfig struct {
 // NMStateTemplateData represents the template data for NMState YAML generation
 type NMStateTemplateData struct {
 	InterfaceName string
+	VLANID        int
+	VLANIfaceName string
 	IPv4          IPConfig
 	IPv6          IPConfig
 }
@@ -58,9 +62,9 @@ func GenerateNMStateYAML(config *NMStateConfig) (string, error) {
 		return "", fmt.Errorf("interface name is required")
 	}
 
-	// Prepare template data
 	templateData := NMStateTemplateData{
 		InterfaceName: config.InterfaceName,
+		VLANID:        config.VLANID,
 		IPv4: IPConfig{
 			Enabled:     false,
 			DHCPEnabled: false,
@@ -71,17 +75,18 @@ func GenerateNMStateYAML(config *NMStateConfig) (string, error) {
 		},
 	}
 
-	// Configure IPv4 if provided
+	if config.VLANID > 0 {
+		templateData.VLANIfaceName = fmt.Sprintf("%s.%d", config.InterfaceName, config.VLANID)
+	}
+
 	if config.IPv4Config != nil {
 		templateData.IPv4 = *config.IPv4Config
 	}
 
-	// Configure IPv6 if provided
 	if config.IPv6Config != nil {
 		templateData.IPv6 = *config.IPv6Config
 	}
 
-	// Parse and execute template
 	tmpl, err := template.New("nmstate").Parse(nmstateTemplate)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse NMState template: %w", err)
@@ -105,6 +110,7 @@ func GenerateNMState(
 	ipv6Gateway string,
 	ipv4DNS string,
 	ipv6DNS string,
+	vlanID int,
 ) (string, error) {
 	if len(ips) == 0 {
 		return "", fmt.Errorf("at least one IP address is required")
@@ -113,7 +119,7 @@ func GenerateNMState(
 		return "", fmt.Errorf("ips and machineNetworks must be same length")
 	}
 
-	config := &NMStateConfig{InterfaceName: interfaceName}
+	config := &NMStateConfig{InterfaceName: interfaceName, VLANID: vlanID}
 
 	for idx, ip := range ips {
 		cidr := machineNetworks[idx]

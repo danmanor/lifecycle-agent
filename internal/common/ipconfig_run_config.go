@@ -9,6 +9,7 @@ type IPConfigRunConfig struct {
 	IPv6Gateway        string `json:"ipv6-gateway,omitempty"`
 	IPv4DNSServer      string `json:"ipv4-dns,omitempty"`
 	IPv6DNSServer      string `json:"ipv6-dns,omitempty"`
+	VLANID             int    `json:"vlan-id,omitempty"`
 	HTTPProxy          string `json:"http-proxy,omitempty"`
 	HTTPSProxy         string `json:"https-proxy,omitempty"`
 	NoProxy            string `json:"no-proxy,omitempty"`

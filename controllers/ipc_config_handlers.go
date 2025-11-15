@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -477,7 +476,6 @@ func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 	return doNotRequeue(), nil
 }
 
-// disableNodeipRerunUnit disables the one-shot nodeip rerun systemd unit if present.
 func (h *IPConfigConfigPhasesHandler) disableNodeipRerunUnit() error {
 	if _, err := h.ChrootOps.SystemctlAction("disable", utils.NodeipRerunUnitPath); err != nil {
 		return fmt.Errorf("failed to disable %s: %w", utils.NodeipRerunUnitPath, err)
@@ -485,8 +483,6 @@ func (h *IPConfigConfigPhasesHandler) disableNodeipRerunUnit() error {
 	return nil
 }
 
-// statusIPsMatchSpec validates that all provided network config in spec matches
-// the observed status in hostNetwork and clusterNetwork.
 func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 	mismatches := []string{}
 
@@ -498,137 +494,33 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 		return fmt.Errorf("host/cluster network not yet populated")
 	}
 
-	// Validate IPv4 if requested
-	if v4 := ipc.Spec.IPv4; v4 != nil {
-		if ipc.Status.Network.HostNetwork.IPv4 == nil {
-			mismatches = append(mismatches, "hostNetwork.ipv4 missing")
-		} else {
-			if err := compareAddressWithPrefix(
-				controllerutils.IPv4FamilyName,
-				v4.Address,
-				ipc.Status.Network.HostNetwork.IPv4.Address,
-			); err != nil {
-				mismatches = append(
-					mismatches, fmt.Sprintf(
-						"ipv4 address mismatch: spec=%s status=%s",
-						v4.Address,
-						ipc.Status.Network.HostNetwork.IPv4.Address,
-					))
-			}
-			if !cidrEqual(v4.MachineNetwork, ipc.Status.Network.HostNetwork.IPv4.MachineNetwork) {
-				mismatches = append(
-					mismatches, fmt.Sprintf(
-						"ipv4 machineNetwork mismatch: spec=%s status=%s",
-						v4.MachineNetwork,
-						ipc.Status.Network.HostNetwork.IPv4.MachineNetwork,
-					))
-			}
-			if v4.Gateway != "" && v4.Gateway != ipc.Status.Network.HostNetwork.IPv4.Gateway {
-				mismatches = append(mismatches, fmt.Sprintf(
-					"ipv4 gateway mismatch: spec=%s status=%s",
-					v4.Gateway,
-					ipc.Status.Network.HostNetwork.IPv4.Gateway,
-				))
-			}
-			if v4.DNSServer != "" && v4.DNSServer != ipc.Status.Network.HostNetwork.IPv4.DNSServer {
-				mismatches = append(
-					mismatches,
-					fmt.Sprintf("ipv4 dns mismatch: spec=%s status=%s",
-						v4.DNSServer,
-						ipc.Status.Network.HostNetwork.IPv4.DNSServer,
-					))
-			}
-		}
-
-		if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv4 == nil || ipc.Status.Network.ClusterNetwork.IPv4.Address == "" {
-			mismatches = append(
-				mismatches,
-				"cluster ipv4 not observed: ipv4 address missing",
-			)
-		} else if !ipEqual(v4.Address, ipc.Status.Network.ClusterNetwork.IPv4.Address) {
-			mismatches = append(
-				mismatches,
-				fmt.Sprintf("cluster ipv4 not observed: want %s got %s", v4.Address, ipc.Status.Network.ClusterNetwork.IPv4.Address),
-			)
-		}
-
-		if v4.MachineNetwork != "" {
-			if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv4 == nil || ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork == "" {
-				mismatches = append(
-					mismatches,
-					fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s", v4.MachineNetwork),
-				)
-			} else if !cidrEqual(v4.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork) {
-				mismatches = append(
-					mismatches,
-					fmt.Sprintf("cluster ipv4 machineNetwork not observed: want %s got %s", v4.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv4.MachineNetwork),
-				)
-			}
+	if ipc.Spec.VLAN != nil {
+		if ipc.Status.Network.HostNetwork.VLANID != ipc.Spec.VLAN.ID {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"vlan mismatch: spec=%d status=%d",
+				ipc.Spec.VLAN.ID, ipc.Status.Network.HostNetwork.VLANID,
+			))
 		}
 	}
 
-	// Validate IPv6 if requested
+	if v4 := ipc.Spec.IPv4; v4 != nil {
+		v4Mismatches := checkFamilyStatusMatchesSpec(
+			"ipv4",
+			v4,
+			ipc.Status.Network.HostNetwork.IPv4,
+			ipc.Status.Network.ClusterNetwork.IPv4,
+		)
+		mismatches = append(mismatches, v4Mismatches...)
+	}
+
 	if v6 := ipc.Spec.IPv6; v6 != nil {
-		if ipc.Status.Network.HostNetwork.IPv6 == nil {
-			mismatches = append(mismatches, "hostNetwork.ipv6 missing")
-		} else {
-			if err := compareAddressWithPrefix(
-				controllerutils.IPv6FamilyName,
-				v6.Address,
-				ipc.Status.Network.HostNetwork.IPv6.Address,
-			); err != nil {
-				mismatches = append(mismatches, fmt.Sprintf(
-					"ipv6 address mismatch: spec=%s status=%s",
-					v6.Address,
-					ipc.Status.Network.HostNetwork.IPv6.Address,
-				))
-			}
-			if !cidrEqual(v6.MachineNetwork, ipc.Status.Network.HostNetwork.IPv6.MachineNetwork) {
-				mismatches = append(
-					mismatches, fmt.Sprintf(
-						"ipv6 machineNetwork mismatch: spec=%s status=%s",
-						v6.MachineNetwork,
-						ipc.Status.Network.HostNetwork.IPv6.MachineNetwork,
-					))
-			}
-			if v6.Gateway != "" && v6.Gateway != ipc.Status.Network.HostNetwork.IPv6.Gateway {
-				mismatches = append(
-					mismatches, fmt.Sprintf(
-						"ipv6 gateway mismatch: spec=%s status=%s",
-						v6.Gateway,
-						ipc.Status.Network.HostNetwork.IPv6.Gateway,
-					))
-			}
-			if v6.DNSServer != "" && v6.DNSServer != ipc.Status.Network.HostNetwork.IPv6.DNSServer {
-				mismatches = append(mismatches, fmt.Sprintf(
-					"ipv6 dns mismatch: spec=%s status=%s",
-					v6.DNSServer,
-					ipc.Status.Network.HostNetwork.IPv6.DNSServer,
-				))
-			}
-		}
-
-		if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv6 == nil || ipc.Status.Network.ClusterNetwork.IPv6.Address == "" {
-			mismatches = append(mismatches, "cluster ipv6 not observed: ipv6 address missing")
-		} else if !ipEqual(v6.Address, ipc.Status.Network.ClusterNetwork.IPv6.Address) {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"cluster ipv6 not observed: want %s got %s",
-				v6.Address,
-				ipc.Status.Network.ClusterNetwork.IPv6.Address,
-			))
-		}
-
-		if v6.MachineNetwork != "" {
-			if ipc.Status.Network.ClusterNetwork == nil || ipc.Status.Network.ClusterNetwork.IPv6 == nil || ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork == "" {
-				mismatches = append(mismatches, fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s", v6.MachineNetwork))
-			} else if !cidrEqual(v6.MachineNetwork, ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork) {
-				mismatches = append(mismatches,
-					fmt.Sprintf("cluster ipv6 machineNetwork not observed: want %s got %s",
-						v6.MachineNetwork,
-						ipc.Status.Network.ClusterNetwork.IPv6.MachineNetwork,
-					))
-			}
-		}
+		v6Mismatches := checkFamilyStatusMatchesSpec(
+			"ipv6",
+			v6,
+			ipc.Status.Network.HostNetwork.IPv6,
+			ipc.Status.Network.ClusterNetwork.IPv6,
+		)
+		mismatches = append(mismatches, v6Mismatches...)
 	}
 
 	if len(mismatches) > 0 {
@@ -638,55 +530,52 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 	return nil
 }
 
-func compareAddressWithPrefix(family, specAddr, statusAddr string) error {
-	specIP, specPref, specHasPref, err := parseAddrMaybePrefix(specAddr)
-	if err != nil {
-		return fmt.Errorf("%s spec address invalid: %v", family, err)
-	}
-	statIP, statPref, statHasPref, err := parseAddrMaybePrefix(statusAddr)
-	if err != nil {
-		return fmt.Errorf("%s status address invalid: %v", family, err)
-	}
-	if !ipEqual(specIP, statIP) {
-		return fmt.Errorf("%s address mismatch: ip differs: spec=%s status=%s", family, specAddr, statusAddr)
-	}
-	if specHasPref && statHasPref && specPref != statPref {
-		return fmt.Errorf("%s address mismatch: prefix differs: spec=%s/%d status=%s/%d", family, specIP, specPref, statIP, statPref)
-	}
-	return nil
-}
+func checkFamilyStatusMatchesSpec(
+	family string,
+	spec *ipcv1.IPFamilyConfig,
+	host *ipcv1.HostIPStatus,
+	cluster *ipcv1.ClusterIPStatus,
+) []string {
+	mismatches := []string{}
 
-func parseAddrMaybePrefix(addr string) (string, int, bool, error) {
-	a := strings.Trim(addr, "[]")
-	if strings.Contains(a, "/") {
-		ip, pref, err := splitAddr(a)
-		if err != nil {
-			return "", 0, false, err
+	if host == nil {
+		mismatches = append(mismatches, fmt.Sprintf("hostNetwork.%s missing", family))
+	} else {
+		if spec.Gateway != "" && spec.Gateway != host.Gateway {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"%s gateway mismatch: spec=%s status=%s",
+				family, spec.Gateway, host.Gateway,
+			))
 		}
-		return ip, pref, true, nil
+		if spec.DNSServer != "" && spec.DNSServer != host.DNSServer {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"%s dns mismatch: spec=%s status=%s",
+				family, spec.DNSServer, host.DNSServer,
+			))
+		}
 	}
-	pi := net.ParseIP(a)
-	if pi == nil {
-		return "", 0, false, fmt.Errorf("invalid ip")
-	}
-	return pi.String(), 0, false, nil
-}
 
-func splitAddr(addr string) (string, int, error) {
-	addr = strings.Trim(addr, "[]")
-	ip, pref, ok := strings.Cut(addr, "/")
-	if !ok {
-		return "", 0, fmt.Errorf("missing prefix")
+	if cluster == nil || cluster.Address == "" {
+		mismatches = append(mismatches, fmt.Sprintf("cluster %s not observed: %s address missing", family, family))
+	} else if !ipEqual(spec.Address, cluster.Address) {
+		mismatches = append(mismatches, fmt.Sprintf(
+			"cluster %s not observed: want %s got %s",
+			family, spec.Address, cluster.Address,
+		))
 	}
-	pi := net.ParseIP(ip)
-	if pi == nil {
-		return "", 0, fmt.Errorf("invalid ip")
+
+	if spec.MachineNetwork != "" {
+		if cluster == nil || cluster.MachineNetwork == "" {
+			mismatches = append(mismatches, fmt.Sprintf("cluster %s machineNetwork not observed: want %s", family, spec.MachineNetwork))
+		} else if !cidrEqual(spec.MachineNetwork, cluster.MachineNetwork) {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"cluster %s machineNetwork not observed: want %s got %s",
+				family, spec.MachineNetwork, cluster.MachineNetwork,
+			))
+		}
 	}
-	n, err := strconv.Atoi(pref)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid prefix")
-	}
-	return pi.String(), n, nil
+
+	return mismatches
 }
 
 func ipEqual(a, b string) bool {
@@ -744,6 +633,10 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 		if v.DNSServer != "" {
 			cfg.IPv6DNSServer = v.DNSServer
 		}
+	}
+
+	if v := ipc.Spec.VLAN; v != nil {
+		cfg.VLANID = v.ID
 	}
 
 	recertImage := getRecertImage(ipc)

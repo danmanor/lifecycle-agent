@@ -285,39 +285,25 @@ spec:
                     description: HostNetwork summarizes current host network
                     properties:
                       ipv4:
-                        description: IPFamilyConfig represents a single stack configuration
+                        description: IPv4 summarizes the current IPv4 on the host
+                          network
                         properties:
-                          address:
-                            description: Address is the full address with prefix length
-                              (e.g., 192.0.2.10/24)
-                            type: string
                           dnsServer:
                             description: DNSServer is the DNS server IP to use
                             type: string
                           gateway:
                             description: Gateway is the default gateway address
-                            type: string
-                          machineNetwork:
-                            description: MachineNetwork is the CIDR of the machine
-                              network (e.g., 192.0.2.0/24)
                             type: string
                         type: object
                       ipv6:
-                        description: IPFamilyConfig represents a single stack configuration
+                        description: IPv6 summarizes the current IPv6 on the host
+                          network
                         properties:
-                          address:
-                            description: Address is the full address with prefix length
-                              (e.g., 192.0.2.10/24)
-                            type: string
                           dnsServer:
                             description: DNSServer is the DNS server IP to use
                             type: string
                           gateway:
                             description: Gateway is the default gateway address
-                            type: string
-                          machineNetwork:
-                            description: MachineNetwork is the CIDR of the machine
-                              network (e.g., 192.0.2.0/24)
                             type: string
                         type: object
                     type: object
