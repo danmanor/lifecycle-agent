@@ -78,9 +78,11 @@ type IPFamilyConfig struct {
 	// MachineNetwork is the CIDR of the machine network (e.g., 192.0.2.0/24)
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	MachineNetwork string `json:"machineNetwork,omitempty"`
+	// +kubebuilder:validation:Required
 	// Gateway is the default gateway address
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	Gateway string `json:"gateway,omitempty"`
+	// +kubebuilder:validation:Required
 	// DNSServer is the DNS server IP to use
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
 	DNSServer string `json:"dnsServer,omitempty"`
@@ -98,7 +100,7 @@ type VLANConfig struct {
 type IPConfigSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=Idle;Config;Rollback
-	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Stage"
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Stage",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:select"}
 	Stage IPConfigStage `json:"stage,omitempty"`
 
 	// IPv4 stack (omit for IPv6-only)
@@ -112,6 +114,13 @@ type IPConfigSpec struct {
 	// Optional VLAN applied to br-ex path
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="VLAN"
 	VLAN *VLANConfig `json:"vlan,omitempty"`
+
+	// DNSResolutionFamily selects the IP family to resolve DNS records to on dual-stack clusters.
+	// When set, the other IP family will be filtered out from DNS responses.
+	// +kubebuilder:validation:Enum=ipv4;ipv6
+	// +optional
+	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="DNS Resolution Family",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:select"}
+	DNSResolutionFamily string `json:"dnsResolutionFamily,omitempty"`
 
 	// AutoRollbackOnFailure defines automatic rollback settings for IPConfig if the configuration
 	// does not complete within the specified time limit. Behavior mirrors IBU.
@@ -145,8 +154,14 @@ type IPConfigStatus struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="Network"
 	Network *NetworkStatus `json:"network,omitempty"`
 
+	// DNSResolutionFamily reports the active DNS response filtering family:
+	// "ipv4", "ipv6" or "none" (no filter set)
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="DNS Resolution Family"
+	DNSResolutionFamily string `json:"dnsResolutionFamily,omitempty"`
+
 	// History stores timing info of different IPConfig stages and their important phases
 	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=status,displayName="History"
 	History []*IPHistory `json:"history,omitempty"`
 }
 

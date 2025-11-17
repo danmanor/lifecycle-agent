@@ -17,9 +17,12 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmostreeclient "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 	"github.com/openshift-kni/lifecycle-agent/utils"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
 
 const (
@@ -91,15 +94,15 @@ func (h *IPConfigConfigStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPCo
 	logger.Info("Starting handleConfig")
 
 	if isIPTransitionRequested(ipc) {
-		if err := validateIPConfigStage(ipc); err != nil {
+		if err := h.validateStageTransition(ctx, ipc); err != nil {
 			controllerutils.SetIPConfigStatusFailed(
 				ipc,
-				"invalid transition: "+string(ipc.Spec.Stage),
+				fmt.Sprintf("validation of Config stage transition failed: %s", err.Error()),
 			)
 			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
 				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
 			}
-			return requeueWithError(fmt.Errorf("invalid IPConfig stage: %w", err))
+			return requeueWithError(fmt.Errorf("validation of Config stage transition failed: %w", err))
 		}
 	}
 
@@ -306,8 +309,7 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
 	}
 
-	newStaterootName := buildIPConfigStaterootName(ipc)
-	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc, newStaterootName); err != nil {
+	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config auto-rollback config: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -356,12 +358,12 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 	if err := h.enableInitMonitorService(); err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
-			fmt.Sprintf("failed to stop init monitor service: %s", err.Error()),
+			fmt.Sprintf("failed to enable init monitor service: %s", err.Error()),
 		)
 		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
-		return requeueWithError(fmt.Errorf("failed to stop init monitor service: %w", err))
+		return requeueWithError(fmt.Errorf("failed to enable init monitor service: %w", err))
 	}
 
 	if err := h.writeIPConfigRunConfig(ipc); err != nil {
@@ -390,7 +392,7 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 
 	// We shouldn't reach here on successful ip-config run
 
-	return doNotRequeue(), nil
+	return requeueWithShortInterval(), nil
 }
 
 // enableInitMonitorService enables the init monitor service in the new stateroot.
@@ -492,6 +494,15 @@ func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 
 	if ipc.Status.Network == nil || ipc.Status.Network.HostNetwork == nil || ipc.Status.Network.ClusterNetwork == nil {
 		return fmt.Errorf("host/cluster network not yet populated")
+	}
+
+	if ipc.Spec.DNSResolutionFamily != "" {
+		if ipc.Status.DNSResolutionFamily != ipc.Spec.DNSResolutionFamily {
+			mismatches = append(mismatches, fmt.Sprintf(
+				"dnsResolutionFamily mismatch: spec=%s status=%s",
+				ipc.Spec.DNSResolutionFamily, ipc.Status.DNSResolutionFamily,
+			))
+		}
 	}
 
 	if ipc.Spec.VLAN != nil {
@@ -648,6 +659,10 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 		cfg.PullSecretRefName = v
 	}
 
+	if ipc.Spec.DNSResolutionFamily != "" {
+		cfg.DNSIPFamily = ipc.Spec.DNSResolutionFamily
+	}
+
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal ip-config run config: %w", err)
@@ -732,5 +747,26 @@ func runLcaCliIPConfigPrepare(
 	if _, err := chrootOps.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
 	}
+	return nil
+}
+
+func (h *IPConfigConfigStageHandler) validateStageTransition(ctx context.Context, ipc *ipcv1.IPConfig) error {
+	if err := validateIPConfigStage(ipc); err != nil {
+		return fmt.Errorf("validation of Config stage transition failed: %w", err)
+	}
+
+	if err := h.validateDNSMasqMCExists(ctx); err != nil {
+		return fmt.Errorf("validation of DNSMasq machine config failed: %w", err)
+	}
+
+	return nil
+}
+
+func (h *IPConfigConfigStageHandler) validateDNSMasqMCExists(ctx context.Context) error {
+	mc := &machineconfigv1.MachineConfig{}
+	if err := h.Client.Get(ctx, types.NamespacedName{Name: common.DnsmasqMachineConfigName}, mc); err != nil {
+		return fmt.Errorf("failed to get dnsmasq machine config: %w", err)
+	}
+
 	return nil
 }

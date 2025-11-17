@@ -21,7 +21,7 @@ func NewRollbackHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClien
 	return &RollbackHandler{log: log, ops: ops, ostree: ostree, rpm: rpm}
 }
 
-func (h *RollbackHandler) RunRollback(stateroot string) error {
+func (h *RollbackHandler) Run(stateroot string) error {
 	h.log.Infof("IP config rollback started with stateroot: %s", stateroot)
 
 	if h.ostree.IsOstreeAdminSetDefaultFeatureEnabled() {

@@ -75,7 +75,6 @@ type Ops interface {
 	GetContainerStorageTarget() (string, error)
 	StopClusterServices() error
 	EnableClusterServices(root string) error
-	EnsureNMStateConfigurationServiceEnabled() error
 }
 
 type CMD struct {
@@ -725,7 +724,6 @@ func (o *ops) StopClusterServices() error {
 }
 
 func (o *ops) EnableClusterServices(root string) error {
-	o.log.Info("Enabling kubelet service")
 	args := []string{}
 	if root != "" {
 		args = append(args, "--root", root)
@@ -734,15 +732,6 @@ func (o *ops) EnableClusterServices(root string) error {
 	_, err := o.SystemctlAction("enable", args...)
 	if err != nil {
 		return fmt.Errorf("failed to enable kubelet: %w", err)
-	}
-	return nil
-}
-
-func (o *ops) EnsureNMStateConfigurationServiceEnabled() error {
-	o.log.Info("Ensuring NMState configuration service is enabled")
-	_, err := o.SystemctlAction("enable", "nmstate-configuration.service")
-	if err != nil {
-		return fmt.Errorf("failed to enable nmstate-configuration: %w", err)
 	}
 	return nil
 }

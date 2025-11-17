@@ -83,6 +83,14 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              dnsResolutionFamily:
+                description: |-
+                  DNSResolutionFamily selects the IP family to resolve DNS records to on dual-stack clusters.
+                  When set, the other IP family will be filtered out from DNS responses.
+                enum:
+                - ipv4
+                - ipv6
+                type: string
               ipv4:
                 description: IPv4 stack (omit for IPv6-only)
                 properties:
@@ -130,6 +138,7 @@ spec:
                 description: Optional VLAN applied to br-ex path
                 properties:
                   id:
+                    minimum: 1
                     type: integer
                 type: object
             type: object
@@ -205,6 +214,11 @@ spec:
                   - type
                   type: object
                 type: array
+              dnsResolutionFamily:
+                description: |-
+                  DNSResolutionFamily reports the active DNS response filtering family:
+                  "ipv4", "ipv6" or "none" (no filter set)
+                type: string
               history:
                 description: History stores timing info of different IPConfig stages
                   and their important phases
@@ -306,6 +320,10 @@ spec:
                             description: Gateway is the default gateway address
                             type: string
                         type: object
+                      vlanId:
+                        description: VLANID is the VLAN identifier on the br-ex uplink
+                          path, if any
+                        type: integer
                     type: object
                 type: object
               observedGeneration:

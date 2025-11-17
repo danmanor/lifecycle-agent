@@ -17,20 +17,17 @@ limitations under the License.
 package ipconfigcmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"path"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -61,11 +58,7 @@ var (
 	vlanID             int
 	pullSecretRefName  string
 	recertImage        string
-)
-
-const (
-	ipFamilyIPv4 = "ipv4"
-	ipFamilyIPv6 = "ipv6"
+	dnsIPFamily        string
 )
 
 func init() {
@@ -84,11 +77,12 @@ func init() {
 	ipConfigRunCmd.Flags().IntVar(&vlanID, "vlan-id", 0, "Optional VLAN ID to use on the br-ex uplink")
 	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
 	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, "pull-secret-ref-name", "", "The name of the pull secret to use for the recert container tool")
+	ipConfigRunCmd.Flags().StringVar(&dnsIPFamily, "dns-ip-family", "", "IP family for DNS resolution (ipv4|ipv6)")
 }
 
 var ipConfigRunCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Execute IP configuration change",
+	Short: "Execute IP configuration change and reboot to the new configuration",
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runIPConfigChange(); err != nil {
 			pkgLog.Fatalf("Error executing ip-config run: %v", err)
@@ -121,6 +115,7 @@ func runIPConfigChange() error {
 			vlanID = cfg.VLANID
 			pullSecretRefName = cfg.PullSecretRefName
 			recertImage = cfg.RecertImage
+			dnsIPFamily = cfg.DNSIPFamily
 		} else {
 			pkgLog.Warnf("failed to unmarshal ip-config run config: %v", jsonErr)
 		}
@@ -140,7 +135,7 @@ func runIPConfigChange() error {
 	ipConfigs := buildIPConfigs(
 		ipv4Address, ipv4MachineNetwork, ipv4Gateway, ipv4DNS,
 		ipv6Address, ipv6MachineNetwork, ipv6Gateway, ipv6DNS,
-		effectivePrimary,
+		lo.FromPtr(effectivePrimary),
 	)
 
 	if recertImage == "" {
@@ -166,33 +161,23 @@ func runIPConfigChange() error {
 		return fmt.Errorf("failed to create runtime client: %w", err)
 	}
 
-	var pullSecretFile = common.ImageRegistryAuthFile
-	if pullSecretRefName != "" {
-		authPath, err := materializeAuthFileFromPullSecretRef(context.Background(), client, pullSecretRefName)
-		if err != nil {
-			return err
-		}
-		defer os.Remove(common.PathOutsideChroot(authPath))
-		pullSecretFile = authPath
-	}
-
 	ipConfigHandler := ipconfig.NewIPConfig(
 		pkgLog,
 		opsInterface,
 		hostCommandsExecutor,
 		client,
 		recertImage,
-		common.LCAWorkspaceDir,
 		ipConfigs,
-		pullSecretFile,
+		pullSecretRefName,
 		vlanID,
+		dnsIPFamily,
 	)
 
 	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-run", hostCommandsExecutor)
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
 	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
-	if err := ipConfigHandler.RunIPConfigChange(); err != nil {
+	if err := ipConfigHandler.Run(); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRunStatusFile,
 			common.IPConfigPhaseFailed,
@@ -220,32 +205,6 @@ func runIPConfigChange() error {
 	return nil
 }
 
-// materializeAuthFileFromPullSecretRef fetches the dockerconfigjson secret by name in the LCA namespace
-// and writes it to an auth file under the LCA workspace, returning the path to the file.
-func materializeAuthFileFromPullSecretRef(
-	ctx context.Context,
-	c runtimeClient.Client,
-	secretName string,
-) (string, error) {
-	secret := &corev1.Secret{}
-	if err := c.Get(ctx, types.NamespacedName{
-		Namespace: common.LcaNamespace,
-		Name:      secretName,
-	}, secret); err != nil {
-		return "", fmt.Errorf("failed to fetch pull secret %s/%s: %w", common.LcaNamespace, secretName, err)
-	}
-	dockercfg, ok := secret.Data[corev1.DockerConfigJsonKey]
-	if !ok || len(dockercfg) == 0 {
-		return "", fmt.Errorf("secret %s/%s missing key %s", common.LcaNamespace, secretName, corev1.DockerConfigJsonKey)
-	}
-	authPath := path.Join(common.LCAWorkspaceDir, "recert-pull-secret.json")
-	if err := os.WriteFile(common.PathOutsideChroot(authPath), dockercfg, 0o600); err != nil {
-		return "", fmt.Errorf("failed to write pull secret auth file: %w", err)
-	}
-	return authPath, nil
-}
-
-// validateIPConfigArgs validates the CLI arguments for IP configuration.
 func validateIPConfigArgs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) error {
 	ipv4Both := ipv4Addr != "" && ipv4Net != ""
 	ipv4None := ipv4Addr == "" && ipv4Net == ""
@@ -297,31 +256,31 @@ func validateIPConfigArgs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) error {
 	return nil
 }
 
-func inferPrimaryStack() (string, error) {
+func inferPrimaryStack() (*string, error) {
 	data, err := os.ReadFile(utils.PrimaryIPPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read primary IP: %w", err)
+		return nil, fmt.Errorf("failed to read primary IP: %w", err)
 	}
 
 	primaryIP := strings.TrimSpace(string(data))
 	if primaryIP == "" {
-		return "", fmt.Errorf("primary IP not found")
+		return nil, fmt.Errorf("primary IP not found")
 	}
 
 	ip := net.ParseIP(primaryIP)
 	if ip == nil {
-		return "", fmt.Errorf("invalid primary IP: %s", primaryIP)
+		return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
 	}
 
 	if ip.To4() != nil {
-		return ipFamilyIPv4, nil
+		return lo.ToPtr(common.IPv4FamilyName), nil
 	}
 
 	if ip.To16() != nil {
-		return ipFamilyIPv6, nil
+		return lo.ToPtr(common.IPv6FamilyName), nil
 	}
 
-	return "", fmt.Errorf("invalid primary IP: %s", primaryIP)
+	return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
 }
 
 // buildIPConfigs creates the ordered slice of NetworkIPConfig with primary first.
@@ -341,12 +300,12 @@ func buildIPConfigs(
 	}
 
 	ipConfigs := []*ipconfig.NetworkIPConfig{}
-	if primary == ipFamilyIPv4 && ipv4Config != nil {
+	if primary == common.IPv4FamilyName && ipv4Config != nil {
 		ipConfigs = append(ipConfigs, ipv4Config)
 		if ipv6Config != nil {
 			ipConfigs = append(ipConfigs, ipv6Config)
 		}
-	} else if primary == ipFamilyIPv6 && ipv6Config != nil {
+	} else if primary == common.IPv6FamilyName && ipv6Config != nil {
 		ipConfigs = append(ipConfigs, ipv6Config)
 		if ipv4Config != nil {
 			ipConfigs = append(ipConfigs, ipv4Config)

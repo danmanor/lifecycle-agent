@@ -291,10 +291,9 @@ func NewIPCRebootClient(log *logr.Logger,
 	}
 }
 
-// WriteIPCAutoRollbackConfigFile writes the IP-config auto-rollback configuration to disk for the init monitor.
-func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig, newStaterootName string) error {
-	staterootPath := common.GetStaterootPath(newStaterootName)
-	cfgfile := common.PathOutsideChroot(filepath.Join(staterootPath, common.IPCAutoRollbackConfigFile))
+// WriteIPCAutoRollbackConfigFile writes the IP-config auto-rollback configuration
+func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error {
+	cfgfile := common.PathOutsideChroot(common.IPCAutoRollbackConfigFile)
 
 	cfgdir := filepath.Dir(cfgfile)
 	if err := os.MkdirAll(cfgdir, 0o700); err != nil {

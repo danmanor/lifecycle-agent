@@ -68,7 +68,7 @@ func init() {
 
 var ipConfigPrepareCmd = &cobra.Command{
 	Use:   "prepare",
-	Short: "Prepare a new stateroot for IP configuration change",
+	Short: "Prepare a new stateroot for IP configuration change and reboot to it",
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runIPConfigPrepare(); err != nil {
 			pkgLog.Fatalf("Error executing ip-config prepare: %v", err)
@@ -100,9 +100,22 @@ func runIPConfigPrepare() error {
 
 	rpmClient := rpmOstree.NewClient("lca-cli-ip-config-prepare", hostCommandsExecutor)
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
-	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
+	rbClient := reboot.NewIPCRebootClient(
+		&logr.Logger{},
+		hostCommandsExecutor,
+		rpmClient,
+		ostreeClient,
+		opsInterface,
+	)
 
-	preparer := ipconfig.NewPrepareHandler(pkgLog, opsInterface, ostreeClient, rpmClient, rbClient, client)
+	ostreeData, err := getOstreeData(newIPv4, newIPv6, rpmClient, ostreeClient, pkgLog)
+	if err != nil {
+		return fmt.Errorf("failed to get ostree data: %w", err)
+	}
+
+	preparer := ipconfig.NewPrepareHandler(
+		pkgLog, opsInterface, ostreeData, ostreeClient, rpmClient, rbClient, client,
+	)
 	if err := common.WriteIPConfigStatus(common.IPConfigPrepareStatusFile, common.IPConfigRunStatus{
 		Phase:     common.IPConfigPhaseRunning,
 		Message:   "ip-config prepare started",
@@ -112,7 +125,7 @@ func runIPConfigPrepare() error {
 	}
 
 	ctx := context.Background()
-	if err := preparer.RunPrepare(ctx, newIPv4, newIPv6); err != nil {
+	if err := preparer.Run(ctx, newIPv4, newIPv6); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigPrepareStatusFile,
 			common.IPConfigPhaseFailed,
@@ -124,15 +137,20 @@ func runIPConfigPrepare() error {
 		return err
 	}
 
-	newStaterootName := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
 	if installInitMonitor {
-		err := installMonitorInitializationServiceInNewStateroot(ostreeClient, opsInterface, newStaterootName, pkgLog)
+		err := installMonitorInitializationServiceInNewStateroot(
+			ostreeClient, opsInterface, ostreeData.NewStateroot.Name, pkgLog,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to install monitor initialization service: %w", err)
 		}
+
+		if err := cleanupMonitorInitializationServiceInOldStateroot(opsInterface, ostreeData); err != nil {
+			return fmt.Errorf("failed to cleanup monitor initialization service in old stateroot: %w", err)
+		}
 	}
 
-	staterootPath := common.GetStaterootPath(newStaterootName)
+	staterootPath := common.GetStaterootPath(ostreeData.NewStateroot.Name)
 	statusFilePath := filepath.Join(staterootPath, common.IPConfigPrepareStatusFile)
 	if err := common.FinalizeIPConfigStatus(
 		statusFilePath,
@@ -158,15 +176,13 @@ func runIPConfigPrepare() error {
 }
 
 // installMonitorInitializationServiceInNewStateroot installs and enables the IPC init monitor service
-// within the new stateroot deployment. The auto-rollback configuration file should be written
-// by the caller (controller) beforehand.
+// within the new stateroot deployment.
 func installMonitorInitializationServiceInNewStateroot(
 	ostree intOstree.IClient,
 	ops ops.Ops,
 	newStaterootName string,
 	logger *logrus.Logger,
 ) error {
-	common.OstreeDeployPathPrefix = "/sysroot"
 	deploymentDir, err := ostree.GetDeploymentDir(newStaterootName)
 	if err != nil {
 		return fmt.Errorf("failed to get deployment dir for %s: %w", newStaterootName, err)
@@ -196,5 +212,126 @@ func installMonitorInitializationServiceInNewStateroot(
 	); err != nil {
 		return fmt.Errorf("failed enabling service %s: %w", common.IPCInitMonitorService, err)
 	}
+
+	staterootPath := common.GetStaterootPath(newStaterootName)
+	initMonitorModeFile := filepath.Join(staterootPath, common.InitMonitorModeFile)
+	if err := os.WriteFile(initMonitorModeFile, []byte("ipconfig"), 0o644); err != nil {
+		return fmt.Errorf("failed to write init monitor mode file: %w", err)
+	}
+
 	return nil
+}
+
+func cleanupMonitorInitializationServiceInOldStateroot(
+	ops ops.Ops, ostreeData *ipconfig.OstreeData,
+) error {
+	if _, err := ops.SystemctlAction("is-enabled", common.IPCInitMonitorService); err == nil {
+		if _, err := ops.SystemctlAction("disable", common.IPCInitMonitorService); err != nil {
+			return fmt.Errorf("failed to disable init monitor in old stateroot: %w", err)
+		}
+	}
+	if _, err := ops.SystemctlAction("is-active", common.IPCInitMonitorService); err == nil {
+		if _, err := ops.SystemctlAction("stop", common.IPCInitMonitorService); err != nil {
+			return fmt.Errorf("failed to stop init monitor in old stateroot: %w", err)
+		}
+	}
+
+	if err := os.Remove(
+		filepath.Join(
+			ostreeData.OldStateroot.DeploymentDir,
+			"etc/systemd/system",
+			common.IPCInitMonitorService,
+		),
+	); err != nil &&
+		!os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove init monitor service file in old stateroot: %w", err)
+	}
+
+	if _, err := ops.SystemctlAction("daemon-reload"); err != nil {
+		return fmt.Errorf("failed to reload systemctl daemon: %w", err)
+	}
+
+	return nil
+}
+
+func getOstreeData(
+	newIPv4, newIPv6 string,
+	rpmOstree rpmOstree.IClient,
+	ostree intOstree.IClient,
+	logger *logrus.Logger,
+) (*ipconfig.OstreeData, error) {
+	common.OstreeDeployPathPrefix = "/sysroot"
+	ostreeData := &ipconfig.OstreeData{}
+
+	currentStaterootData, err := getCurrentStaterootData(rpmOstree, ostree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current stateroot data: %w", err)
+	}
+	ostreeData.OldStateroot = currentStaterootData
+
+	newStaterootData, err := getNewStaterootData(newIPv4, newIPv6, ostree, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get new stateroot data: %w", err)
+	}
+	ostreeData.NewStateroot = newStaterootData
+
+	return ostreeData, nil
+}
+
+func getCurrentStaterootData(rpmOstree rpmOstree.IClient, ostree intOstree.IClient) (*ipconfig.StaterootData, error) {
+	staterootData := &ipconfig.StaterootData{}
+
+	currentStaterootName, err := rpmOstree.GetCurrentStaterootName()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current stateroot name: %w", err)
+	}
+	staterootData.Name = currentStaterootName
+
+	staterootData.Path = common.GetStaterootPath(currentStaterootName)
+
+	oldDeploymentName, err := ostree.GetDeployment(currentStaterootName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment for %s: %w", currentStaterootName, err)
+	}
+	staterootData.DeploymentName = oldDeploymentName
+
+	oldDeploymentDir, err := ostree.GetDeploymentDir(currentStaterootName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment dir for %s: %w", currentStaterootName, err)
+	}
+	staterootData.DeploymentDir = oldDeploymentDir
+
+	return staterootData, nil
+}
+
+func getNewStaterootData(
+	newIPv4, newIPv6 string,
+	ostree intOstree.IClient,
+	logger *logrus.Logger,
+) (*ipconfig.StaterootData, error) {
+	staterootData := &ipconfig.StaterootData{}
+
+	newStaterootName := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
+	staterootData.Name = newStaterootName
+
+	staterootData.Path = common.GetStaterootPath(newStaterootName)
+
+	newDeploymentName, err := ostree.GetDeployment(newStaterootName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment name for %s: %w", newStaterootName, err)
+	}
+	if newDeploymentName != "" {
+		staterootData.DeploymentName = newDeploymentName
+		logger.Infof("Found deployment for new stateroot before creation %s: %s", newStaterootName, newDeploymentName)
+	} else {
+		return staterootData, nil
+	}
+
+	newDeploymentDir, err := ostree.GetDeploymentDir(newStaterootName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get deployment dir for %s: %w", newStaterootName, err)
+	}
+	staterootData.DeploymentDir = newDeploymentDir
+
+	return staterootData, nil
 }

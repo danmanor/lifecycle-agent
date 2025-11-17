@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -19,55 +20,72 @@ import (
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 )
 
+type OstreeData struct {
+	OldStateroot *StaterootData
+	NewStateroot *StaterootData
+}
+
+type StaterootData struct {
+	Name           string
+	Path           string
+	DeploymentDir  string
+	DeploymentName string
+}
+
 type PrepareHandler struct {
-	log    *logrus.Logger
-	ops    ops.Ops
-	ostree intOstree.IClient
-	rpm    rpmOstree.IClient
-	reboot reboot.RebootIntf
-	k8s    runtimeclient.Client
+	log        *logrus.Logger
+	ops        ops.Ops
+	ostreeData *OstreeData
+	ostree     intOstree.IClient
+	rpm        rpmOstree.IClient
+	reboot     reboot.RebootIntf
+	k8s        runtimeclient.Client
 }
 
 func NewPrepareHandler(
 	log *logrus.Logger,
 	ops ops.Ops,
+	ostreeData *OstreeData,
 	ostree intOstree.IClient,
 	rpm rpmOstree.IClient,
 	reboot reboot.RebootIntf,
 	k8s runtimeclient.Client,
 ) *PrepareHandler {
-	return &PrepareHandler{log: log, ops: ops, ostree: ostree, rpm: rpm, reboot: reboot, k8s: k8s}
+	return &PrepareHandler{
+		log:        log,
+		ops:        ops,
+		ostreeData: ostreeData,
+		ostree:     ostree,
+		rpm:        rpm,
+		reboot:     reboot,
+		k8s:        k8s,
+	}
 }
 
-func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string) (err error) {
-	p.log.Infof("IP config prepare started with IPv4: %s and IPv6: %s", newIPv4, newIPv6)
-
-	newStateroot := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
-	if err = p.ensureSysrootWritable(); err != nil {
-		return
+func (p *PrepareHandler) Run(ctx context.Context, newIPv4, newIPv6 string) (err error) {
+	p.log.Infof("IP config prepare started")
+	if newIPv4 != "" {
+		p.log.Infof("Changing IPv4 address to: %s", newIPv4)
+	}
+	if newIPv6 != "" {
+		p.log.Infof("Changing IPv6 address to: %s", newIPv6)
 	}
 
+	p.log.Info("Fetching current kernel args")
 	kargs, err := p.fetchCurrentKernelArgs()
 	if err != nil {
 		err = fmt.Errorf("failed to get current kernel args: %w", err)
 		return
 	}
 
-	currentStateroot, bootedCommit, err := p.getCurrentStaterootAndBootedCommit()
-	if err != nil {
-		return
-	}
-
-	if err = p.deployNewStateroot(newStateroot, bootedCommit, kargs); err != nil {
-		return
-	}
-
+	p.log.Info("Stopping cluster services")
 	if err = p.ops.StopClusterServices(); err != nil {
 		err = fmt.Errorf("failed to stop cluster services: %w", err)
 		return
 	}
 
 	defer func() {
+		p.log.Info("Enabling cluster services in old stateroot")
 		if internalErr := p.ops.EnableClusterServices(""); internalErr != nil {
 			if err == nil {
 				err = internalErr
@@ -77,21 +95,15 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 		}
 	}()
 
-	if err := p.copyStateRootData(currentStateroot, newStateroot); err != nil {
-		return err
+	p.log.Info("Preparing new stateroot")
+	if err = p.prepareNewStateroot(p.ostreeData, kargs); err != nil {
+		return fmt.Errorf("failed to prepare new stateroot: %w", err)
 	}
 
-	if err := p.setDefaultDeploymentIfEnabled(newStateroot); err != nil {
-		return err
-	}
-
-	newDeploymentDir, err := p.ostree.GetDeploymentDir(newStateroot)
-	if err != nil {
-		err = fmt.Errorf("failed to get deployment dir for %s: %w", newStateroot, err)
-		return
-	}
-
-	if err = p.ops.EnableClusterServices(newDeploymentDir); err != nil {
+	p.log.Info("Enabling cluster services in new stateroot")
+	if err = p.ops.EnableClusterServices(
+		p.ostreeData.NewStateroot.DeploymentDir,
+	); err != nil {
 		err = fmt.Errorf("failed to enable cluster services: %w", err)
 		return
 	}
@@ -101,24 +113,55 @@ func (p *PrepareHandler) RunPrepare(ctx context.Context, newIPv4, newIPv6 string
 	return nil
 }
 
-func (p *PrepareHandler) ensureSysrootWritable() error {
-	common.OstreeDeployPathPrefix = "/sysroot"
+func (p *PrepareHandler) prepareNewStateroot(
+	ostreeData *OstreeData,
+	kernelArgs []string,
+) error {
+	if err := p.ensureSysrootWritable(); err != nil {
+		return fmt.Errorf("failed to ensure sysroot writable: %w", err)
+	}
 
+	if ostreeData.NewStateroot.DeploymentName == "" {
+		p.log.Infof("New stateroot %s is not deployed, deploying it", ostreeData.NewStateroot.Name)
+
+		bootedCommit, err := p.getBootedCommit()
+		if err != nil {
+			return fmt.Errorf("failed to get booted commit: %w", err)
+		}
+
+		if err = p.deployNewStateroot(
+			ostreeData,
+			lo.FromPtr(bootedCommit),
+			kernelArgs,
+		); err != nil {
+			return fmt.Errorf("failed to deploy new stateroot: %w", err)
+		}
+	} else {
+		p.log.Infof("New stateroot %s is already deployed, skipping deploy", ostreeData.NewStateroot.Name)
+	}
+
+	if err := p.copyStateRootData(ostreeData); err != nil {
+		return fmt.Errorf("failed to copy state root data: %w", err)
+	}
+
+	if err := p.setDefaultDeploymentIfEnabled(ostreeData.NewStateroot.Name); err != nil {
+		return fmt.Errorf("failed to set default deployment: %w", err)
+	}
+
+	return nil
+}
+
+func (p *PrepareHandler) ensureSysrootWritable() error {
 	if err := p.ops.RemountSysroot(); err != nil {
 		return fmt.Errorf("failed to remount /sysroot rw: %w", err)
 	}
 	return nil
 }
 
-func (p *PrepareHandler) getCurrentStaterootAndBootedCommit() (string, string, error) {
-	currentStateroot, err := p.rpm.GetCurrentStaterootName()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get current stateroot: %w", err)
-	}
-
+func (p *PrepareHandler) getBootedCommit() (*string, error) {
 	status, err := p.rpm.QueryStatus()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to query rpm-ostree status: %w", err)
+		return nil, fmt.Errorf("failed to query rpm-ostree status: %w", err)
 	}
 
 	var bootedCommit string
@@ -128,76 +171,65 @@ func (p *PrepareHandler) getCurrentStaterootAndBootedCommit() (string, string, e
 			break
 		}
 	}
+
 	if bootedCommit == "" {
-		return "", "", fmt.Errorf("failed to determine booted deployment commit")
+		return nil, fmt.Errorf("failed to determine booted deployment commit")
 	}
 
-	return currentStateroot, bootedCommit, nil
+	return &bootedCommit, nil
 }
 
-func (p *PrepareHandler) deployNewStateroot(newStateroot, bootedCommit string, kargs []string) error {
-	if existing, _ := p.ostree.GetDeployment(newStateroot); existing != "" {
-		if strings.HasPrefix(existing, bootedCommit) {
-			p.log.Infof("stateroot %s already deployed with commit %s, skipping deploy", newStateroot, bootedCommit)
-			return nil
-		}
+func (p *PrepareHandler) deployNewStateroot(
+	ostreeData *OstreeData,
+	bootedCommit string,
+	kargs []string,
+) error {
+	common.OstreeDeployPathPrefix = "/sysroot"
+	if err := p.ostree.OSInit(ostreeData.NewStateroot.Name); err != nil {
+		return fmt.Errorf("failed to initialize ostree: %w", err)
 	}
 
-	if err := p.ostree.OSInit(newStateroot); err != nil {
-		p.log.Warnf("os-init for %s returned error, assuming already initialized: %v", newStateroot, err)
-	}
-
-	if err := p.ostree.Deploy(newStateroot, bootedCommit, kargs, p.rpm, false); err != nil {
+	if err := p.ostree.Deploy(ostreeData.NewStateroot.Name, bootedCommit, kargs, p.rpm, false); err != nil {
 		return fmt.Errorf("failed ostree admin deploy: %w", err)
 	}
+
+	deploymentName, err := p.ostree.GetDeployment(ostreeData.NewStateroot.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment for %s: %w", ostreeData.NewStateroot.Name, err)
+	}
+	ostreeData.NewStateroot.DeploymentName = deploymentName
+
+	deploymentDir, err := p.ostree.GetDeploymentDir(ostreeData.NewStateroot.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get deployment dir for %s: %w", ostreeData.NewStateroot.Name, err)
+	}
+	ostreeData.NewStateroot.DeploymentDir = deploymentDir
+
 	return nil
 }
 
-func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string) error {
-	oldSRPath := common.GetStaterootPath(currentStateroot)
-	newSRPath := common.GetStaterootPath(newStateroot)
-
-	oldDeploymentDir, err := p.ostree.GetDeploymentDir(currentStateroot)
-	if err != nil {
-		return fmt.Errorf("failed to get deployment dir for %s: %w", currentStateroot, err)
-	}
-	newDeploymentDir, err := p.ostree.GetDeploymentDir(newStateroot)
-	if err != nil {
-		return fmt.Errorf("failed to get deployment dir for %s: %w", newStateroot, err)
-	}
-
-	err = os.MkdirAll(oldDeploymentDir, 0o755)
-	if err != nil {
-		return fmt.Errorf("failed to create deployment dir for %s: %w", currentStateroot, err)
-	}
-	err = os.MkdirAll(newDeploymentDir, 0o755)
-	if err != nil {
-		return fmt.Errorf("failed to create deployment dir for %s: %w", newStateroot, err)
-	}
-
-	if err := p.copyVar(oldSRPath, newSRPath); err != nil {
+func (p *PrepareHandler) copyStateRootData(ostreeData *OstreeData) error {
+	if err := p.copyVar(
+		ostreeData.OldStateroot.Path,
+		ostreeData.NewStateroot.Path,
+	); err != nil {
 		return err
 	}
 
-	if err := p.copyEtc(oldDeploymentDir, newDeploymentDir); err != nil {
+	if err := p.copyEtc(
+		ostreeData.OldStateroot.DeploymentDir,
+		ostreeData.NewStateroot.DeploymentDir,
+	); err != nil {
 		return err
 	}
 
-	oldDeploymentName, err := p.ostree.GetDeployment(currentStateroot)
-	if err != nil {
-		return fmt.Errorf("failed to get deployment for %s: %w", currentStateroot, err)
-	}
-	newDeploymentName, err := p.ostree.GetDeployment(newStateroot)
-	if err != nil {
-		return fmt.Errorf("failed to get deployment for %s: %w", newStateroot, err)
-	}
-
-	if err := p.copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymentName, newDeploymentName); err != nil {
-		internalErr := p.ops.EnableClusterServices("")
-		if internalErr != nil {
-			return fmt.Errorf("failed to enable cluster services: %w", internalErr)
-		}
-		return err
+	if err := p.copyDeploymentOrigin(
+		ostreeData.OldStateroot.Path,
+		ostreeData.NewStateroot.Path,
+		ostreeData.OldStateroot.DeploymentName,
+		ostreeData.NewStateroot.DeploymentName,
+	); err != nil {
+		return fmt.Errorf("failed to copy deployment origin: %w", err)
 	}
 
 	return nil
@@ -205,16 +237,18 @@ func (p *PrepareHandler) copyStateRootData(currentStateroot, newStateroot string
 
 func (p *PrepareHandler) setDefaultDeploymentIfEnabled(newStateroot string) error {
 	if !p.ostree.IsOstreeAdminSetDefaultFeatureEnabled() {
-		return nil
+		return fmt.Errorf("ostree admin set default feature is not enabled")
 	}
 
 	idx, err := p.rpm.GetDeploymentIndex(newStateroot)
 	if err != nil {
 		return fmt.Errorf("failed to get deployment index for %s: %w", newStateroot, err)
 	}
+
 	if err := p.ostree.SetDefaultDeployment(idx); err != nil {
 		return fmt.Errorf("failed to set default deployment: %w", err)
 	}
+
 	return nil
 }
 

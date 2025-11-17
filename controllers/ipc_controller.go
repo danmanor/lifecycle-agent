@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -9,7 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	igntypes "github.com/coreos/ignition/v2/config/v3_2/types"
 	"github.com/go-logr/logr"
+	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -37,6 +40,7 @@ import (
 
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=machineconfiguration.openshift.io,resources=machineconfigs,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get
@@ -470,7 +474,7 @@ func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ctx context.Context, i
 		dnsV6,
 		nodeIPs,
 		machineCIDRs,
-		lo.FromPtr(vlanID),
+		vlanID,
 	)
 
 	if ipc.Status.Network == nil {
@@ -480,7 +484,57 @@ func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ctx context.Context, i
 	ipc.Status.Network.HostNetwork = host
 	ipc.Status.Network.ClusterNetwork = cluster
 
+	fam, err := r.inferDNSResolutionFamilyFromMC(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to infer DNS resolution family from MC: %w", err)
+	}
+	ipc.Status.DNSResolutionFamily = lo.FromPtr(fam)
+
 	return nil
+}
+
+// inferDNSResolutionFamilyFromMC inspects the MachineConfig used to configure dnsmasq
+// and infers the active DNS filter: "ipv4", "ipv6" or "none" when not set.
+// It is assumed that the dnsmasq MachineConfig is the only one that contains the dnsmasq filter file.
+// and it can only container one of the known filters or not exist.
+func (r *IPConfigReconciler) inferDNSResolutionFamilyFromMC(ctx context.Context) (*string, error) {
+	mc := &machineconfigv1.MachineConfig{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: common.DnsmasqMachineConfigName}, mc); err != nil {
+		return nil, fmt.Errorf("failed to get dnsmasq machine config: %w", err)
+	}
+
+	var cfg igntypes.Config
+	if len(mc.Spec.Config.Raw) > 0 {
+		if err := json.Unmarshal(mc.Spec.Config.Raw, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse ignition config: %w", err)
+		}
+	}
+
+	v4Encoded := base64.StdEncoding.EncodeToString([]byte(common.DnsmasqFilterIPv4))
+	v6Encoded := base64.StdEncoding.EncodeToString([]byte(common.DnsmasqFilterIPv6))
+	v4Source := fmt.Sprintf(common.DataURLBase64Template, v4Encoded)
+	v6Source := fmt.Sprintf(common.DataURLBase64Template, v6Encoded)
+
+	for _, f := range cfg.Storage.Files {
+		if f.Path != common.DnsmasqFilterTargetPath {
+			continue
+		}
+
+		if f.Contents.Source == nil {
+			return nil, fmt.Errorf("contents source is nil for file %s", f.Path)
+		}
+
+		switch *f.Contents.Source {
+		case v4Source:
+			return lo.ToPtr(common.IPv4FamilyName), nil
+		case v6Source:
+			return lo.ToPtr(common.IPv6FamilyName), nil
+		default:
+			return nil, fmt.Errorf("unknown contents source: %s", *f.Contents.Source)
+		}
+	}
+
+	return lo.ToPtr("none"), nil
 }
 
 // installConfigSubset captures only the fields we need from install-config
@@ -561,11 +615,9 @@ func (r *IPConfigReconciler) nmstateShowJSON() (string, error) {
 func parseNmstate(output string) (nmState, error) {
 	var state nmState
 
-	if err := json.Unmarshal([]byte(output), &state); err == nil {
-		fmt.Println("parsed JSON state:", state)
-		return state, nil
+	if err := json.Unmarshal([]byte(output), &state); err != nil {
+		return state, fmt.Errorf("failed to parse nmstate JSON: %w", err)
 	}
-
 	return state, nil
 }
 
@@ -607,24 +659,6 @@ func findDefaultGateways(state nmState) (string, string) {
 	return findGW(controllerutils.DefaultRouteV4), findGW(controllerutils.DefaultRouteV6)
 }
 
-func toCIDR(ip string, prefix int) string {
-	if ip == "" || prefix <= 0 {
-		return ""
-	}
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return ""
-	}
-	var mask net.IPMask
-	if parsed.To4() != nil {
-		mask = net.CIDRMask(prefix, controllerutils.IPv4TotalBits)
-	} else {
-		mask = net.CIDRMask(prefix, controllerutils.IPv6TotalBits)
-	}
-	network := parsed.Mask(mask)
-	return fmt.Sprintf("%s/%d", network.String(), prefix)
-}
-
 func buildHostAndCluster(
 	gw4 string,
 	gw6 string,
@@ -632,7 +666,7 @@ func buildHostAndCluster(
 	dnsV6 string,
 	nodeIPs []string,
 	machineCIDRs []string,
-	vlanID int,
+	vlanID *int,
 ) (*ipcv1.HostNetworkStatus, *ipcv1.ClusterNetworkStatus) {
 	host := &ipcv1.HostNetworkStatus{}
 	cluster := &ipcv1.ClusterNetworkStatus{}
@@ -673,7 +707,9 @@ func buildHostAndCluster(
 		DNSServer: dnsV6,
 	}
 
-	host.VLANID = vlanID
+	if vlanID != nil {
+		host.VLANID = *vlanID
+	}
 
 	return host, cluster
 }
@@ -729,5 +765,5 @@ func extractBrExVLANID(state nmState) (*int, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("br-ex uplink VLAN ID not found")
+	return nil, nil
 }

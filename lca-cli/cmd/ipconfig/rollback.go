@@ -77,7 +77,7 @@ func runIPConfigRollback() error {
 	}
 
 	exec := ipconfig.NewRollbackHandler(pkgLog, opsInterface, ostreeClient, rpmClient)
-	if err := exec.RunRollback(rollbackStateroot); err != nil {
+	if err := exec.Run(rollbackStateroot); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRollbackStatusFile,
 			common.IPConfigPhaseFailed,

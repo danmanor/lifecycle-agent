@@ -64,7 +64,14 @@ func initMonitor() error {
 		}
 	}
 
-	initMonitorRunner := initmonitor.NewInitMonitor(scheme, log, hostCommandsExecutor, ops.NewOps(log, hostCommandsExecutor), monitorSvcUnitComponentTag, monitorMode)
+	initMonitorRunner := initmonitor.NewInitMonitor(
+		scheme,
+		log,
+		hostCommandsExecutor,
+		ops.NewOps(log, hostCommandsExecutor),
+		monitorSvcUnitComponentTag,
+		monitorMode,
+	)
 	if launchMonitor {
 		if err := initMonitorRunner.RunInitMonitor(); err != nil {
 			return fmt.Errorf("failed to run init monitor: %w", err)

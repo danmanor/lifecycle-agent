@@ -3,6 +3,7 @@ package ipconfig
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -19,12 +20,22 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	igntypes "github.com/coreos/ignition/v2/config/v3_2/types"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/recert"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	"github.com/openshift-kni/lifecycle-agent/utils"
 	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
+
+type RecertClusterData struct {
+	Proxy                *ProxyConfig
+	InstallConfig        string
+	IngressCertificateCN string
+	CurrentNodeIPs       []string
+	CryptoDir            string
+	PullSecretFile       string
+}
 
 // NetworkIPConfig is a minimal representation of an IP and its machine network.
 type NetworkIPConfig struct {
@@ -36,15 +47,15 @@ type NetworkIPConfig struct {
 
 // IPConfig handles the IP change process
 type IPConfigHandler struct {
-	log            *logrus.Logger
-	ops            ops.Ops
-	executor       ops.Execute
-	recertImage    string
-	workingDir     string
-	IPConfigs      []*NetworkIPConfig
-	runtimeClient  runtimeclient.Client
-	PullSecretFile string
-	VLANID         int
+	log               *logrus.Logger
+	ops               ops.Ops
+	executor          ops.Execute
+	recertImage       string
+	IPConfigs         []*NetworkIPConfig
+	runtimeClient     runtimeclient.Client
+	PullSecretRefName string
+	VLANID            int
+	DNSIPFamily       string
 }
 
 // NewIPConfig creates a new IPConfig instance
@@ -54,21 +65,21 @@ func NewIPConfig(
 	executor ops.Execute,
 	runtimeClient runtimeclient.Client,
 	recertImage string,
-	workingDir string,
 	ipConfigs []*NetworkIPConfig,
-	pullSecretFile string,
+	pullSecretRefName string,
 	vlanID int,
+	dnsIPFamily string,
 ) *IPConfigHandler {
 	return &IPConfigHandler{
-		log:            log,
-		ops:            ops,
-		executor:       executor,
-		recertImage:    recertImage,
-		workingDir:     workingDir,
-		runtimeClient:  runtimeClient,
-		IPConfigs:      ipConfigs,
-		PullSecretFile: pullSecretFile,
-		VLANID:         vlanID,
+		log:               log,
+		ops:               ops,
+		executor:          executor,
+		recertImage:       recertImage,
+		runtimeClient:     runtimeClient,
+		IPConfigs:         ipConfigs,
+		PullSecretRefName: pullSecretRefName,
+		VLANID:            vlanID,
+		DNSIPFamily:       dnsIPFamily,
 	}
 }
 
@@ -81,7 +92,7 @@ type ProxyConfig struct {
 	StatusNoProxy    string
 }
 
-func (i *IPConfigHandler) RunIPConfigChange() error {
+func (i *IPConfigHandler) Run() error {
 	i.log.Infof("Starting IP config process")
 	for _, ipConfig := range i.IPConfigs {
 		if ipConfig == nil {
@@ -103,78 +114,50 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 
 	ctx := context.Background()
 
-	proxy, err := i.computeAndSetProxy(ctx)
+	i.log.Info("Preparing recert cluster data")
+	prepareRecertClusterData, err := i.prepareRecertClusterData(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to compute proxy configuration: %w", err)
-	}
-	if proxy != nil {
-		i.log.Info("Proxy is set")
+		return fmt.Errorf("failed to prepare recert cluster data: %w", err)
 	}
 
-	if err := i.createWorkingDir(); err != nil {
-		return fmt.Errorf("failed to create working directory: %w", err)
-	}
-
-	cryptoDir := path.Join(i.workingDir, common.KubeconfigCryptoDir)
-	if err := i.createCryptoDir(cryptoDir); err != nil {
-		return fmt.Errorf("failed to create crypto directory: %w", err)
-	}
-
-	if err := i.collectKubeConfigCrypto(ctx, cryptoDir); err != nil {
-		return fmt.Errorf("failed to collect kubeconfig crypto: %w", err)
-	}
-
-	ingressCertificateCN, err := utils.GetIngressCertificateCN(ctx, i.runtimeClient)
-	if err != nil {
-		return fmt.Errorf("failed to get ingress certificate CN: %w", err)
-	}
-	i.log.Info("Found ingress certificate CN")
-
-	installConfig, err := utils.GetInstallConfig(ctx, i.runtimeClient)
-	if err != nil {
-		return fmt.Errorf("failed to get install config: %w", err)
-	}
-	i.log.Info("Found install config")
-
-	currentNodeIPs, err := utils.GetNodeInternalIPs(ctx, i.runtimeClient)
-	if err != nil {
-		return fmt.Errorf("failed to get current node internal IPs: %w", err)
-	}
-
+	i.log.Info("Creating network configuration")
 	if err := i.CreateNetworkConfiguration(ctx); err != nil {
-		return err
+		return fmt.Errorf("failed to create network configuration: %w", err)
 	}
 
+	i.log.Info("Configuring dnsmasq override")
+	if err := i.configureDNSMasq(ctx); err != nil {
+		return fmt.Errorf("failed to configure dnsmasq override: %w", err)
+	}
+
+	i.log.Info("Stopping cluster services")
 	if err := i.ops.StopClusterServices(); err != nil {
-		return err
+		return fmt.Errorf("failed to stop cluster services: %w", err)
 	}
 
-	if err := i.runRecert(installConfig, ingressCertificateCN, cryptoDir, currentNodeIPs, proxy); err != nil {
-		return err
+	i.log.Info("Running recert flow")
+	if err := i.runRecert(prepareRecertClusterData); err != nil {
+		return fmt.Errorf("failed to run recert flow: %w", err)
 	}
 
-	if err := i.ops.EnsureNMStateConfigurationServiceEnabled(); err != nil {
-		return err
-	}
-
+	i.log.Info("Ensuring nodeip rerun service")
 	if err := i.ensureNodeIPRerunService(i.IPConfigs[0].MachineNetwork); err != nil {
-		return err
+		return fmt.Errorf("failed to ensure nodeip rerun service: %w", err)
 	}
 
-	if err := i.configureDNSMasqOverride(); err != nil {
-		return err
-	}
-
+	i.log.Info("Cleaning up nmstate residual state files")
 	if err := i.cleanupNMStateAppliedFiles(); err != nil {
-		return err
+		return fmt.Errorf("failed to cleanup nmstate residual files: %w", err)
 	}
 
+	i.log.Info("Removing stale files for regeneration")
 	if err := i.removeStaleFilesForRegeneration(); err != nil {
-		return err
+		return fmt.Errorf("failed to remove stale files for regeneration: %w", err)
 	}
 
+	i.log.Info("Enabling cluster services")
 	if err := i.ops.EnableClusterServices(""); err != nil {
-		return err
+		return fmt.Errorf("failed to enable cluster services: %w", err)
 	}
 
 	i.log.Info("IP config process completed successfully")
@@ -182,13 +165,70 @@ func (i *IPConfigHandler) RunIPConfigChange() error {
 	return nil
 }
 
-// computeAndSetProxy reads the cluster Proxy CR, and if proxy is configured,
+func (i *IPConfigHandler) prepareRecertClusterData(
+	ctx context.Context,
+) (*RecertClusterData, error) {
+	proxy, err := i.prepareProxyConfigForRecert(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute proxy configuration: %w", err)
+	}
+	if proxy != nil {
+		i.log.Info("Proxy is set")
+	}
+
+	cryptoDir := path.Join(common.LCAWorkspaceDir, common.KubeconfigCryptoDir)
+	if err := i.createCryptoDir(cryptoDir); err != nil {
+		return nil, fmt.Errorf("failed to create crypto directory: %w", err)
+	}
+
+	if err := i.collectKubeConfigCrypto(ctx, cryptoDir); err != nil {
+		return nil, fmt.Errorf("failed to collect kubeconfig crypto: %w", err)
+	}
+
+	ingressCertificateCN, err := utils.GetIngressCertificateCN(ctx, i.runtimeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ingress certificate CN: %w", err)
+	}
+	i.log.Info("Found ingress certificate CN")
+
+	installConfig, err := utils.GetInstallConfig(ctx, i.runtimeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get install config: %w", err)
+	}
+	i.log.Info("Found install config")
+
+	currentNodeIPs, err := utils.GetNodeInternalIPs(ctx, i.runtimeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current node internal IPs: %w", err)
+	}
+
+	var pullSecretFile = common.ImageRegistryAuthFile
+	if i.PullSecretRefName != "" {
+		authPath, err := materializeAuthFileFromPullSecretRef(ctx, i.runtimeClient, i.PullSecretRefName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to materialize pull secret file: %w", err)
+		}
+		defer os.Remove(common.PathOutsideChroot(authPath))
+		pullSecretFile = authPath
+	}
+
+	return &RecertClusterData{
+		Proxy:                proxy,
+		InstallConfig:        installConfig,
+		IngressCertificateCN: ingressCertificateCN,
+		CryptoDir:            cryptoDir,
+		CurrentNodeIPs:       currentNodeIPs,
+		PullSecretFile:       pullSecretFile,
+	}, nil
+}
+
+// prepareProxyConfig reads the cluster Proxy CR, and if proxy is configured,
 // calculates the effective NoProxy by combining:
 // - localhost defaults
 // - new machine networks provided to ip-config
 // - user-provided spec noProxy
 // It then sets both spec and status proxy on the handler to be passed to recert.
-func (i *IPConfigHandler) computeAndSetProxy(ctx context.Context) (*ProxyConfig, error) {
+func (i *IPConfigHandler) prepareProxyConfigForRecert(ctx context.Context) (*ProxyConfig, error) {
 	proxy := &ocp_config_v1.Proxy{}
 	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: common.OpenshiftProxyCRName}, proxy); err != nil {
 		return nil, fmt.Errorf("failed to get proxy: %w", err)
@@ -242,13 +282,7 @@ func (i *IPConfigHandler) computeAndSetProxy(ctx context.Context) (*ProxyConfig,
 	}, nil
 }
 
-func (i *IPConfigHandler) runRecert(
-	installConfig string,
-	ingressCertificateCN string,
-	cryptoDir string,
-	currentNodeIPs []string,
-	proxy *ProxyConfig,
-) error {
+func (i *IPConfigHandler) runRecert(clusterData *RecertClusterData) error {
 	i.log.Info("Creating recert configuration file")
 
 	oldIPs := make([]string, len(i.IPConfigs))
@@ -256,7 +290,7 @@ func (i *IPConfigHandler) runRecert(
 	newMachineNetworks := make([]string, len(i.IPConfigs))
 
 	for i, cfg := range i.IPConfigs {
-		oldIP, matchErr := selectIPOfSameFamily(cfg.IP, currentNodeIPs)
+		oldIP, matchErr := selectIPOfSameFamily(cfg.IP, clusterData.CurrentNodeIPs)
 		if matchErr != nil {
 			return fmt.Errorf("failed to select old IP to match new IP %s: %w", cfg.IP, matchErr)
 		}
@@ -265,41 +299,37 @@ func (i *IPConfigHandler) runRecert(
 		newMachineNetworks[i] = cfg.MachineNetwork
 	}
 
-	if proxy == nil {
-		proxy = &ProxyConfig{}
+	if clusterData.Proxy == nil {
+		clusterData.Proxy = &ProxyConfig{}
 	}
 
 	if err := recert.CreateRecertConfigFileForIPConfig(
 		oldIPs,
 		newIPs,
 		newMachineNetworks,
-		installConfig,
-		cryptoDir,
-		ingressCertificateCN,
-		i.workingDir,
-		proxy.HTTPProxy,
-		proxy.HTTPSProxy,
-		proxy.NoProxy,
-		proxy.StatusHTTPProxy,
-		proxy.StatusHTTPSProxy,
-		proxy.StatusNoProxy,
+		clusterData.InstallConfig,
+		clusterData.CryptoDir,
+		clusterData.IngressCertificateCN,
+		common.LCAWorkspaceDir,
+		clusterData.Proxy.HTTPProxy,
+		clusterData.Proxy.HTTPSProxy,
+		clusterData.Proxy.NoProxy,
+		clusterData.Proxy.StatusHTTPProxy,
+		clusterData.Proxy.StatusHTTPSProxy,
+		clusterData.Proxy.StatusNoProxy,
 	); err != nil {
 		return fmt.Errorf("failed to create recert configuration file: %w", err)
 	}
-	i.log.Info("Starting recert full flow")
 
-	authFile := common.ImageRegistryAuthFile
-	if i.PullSecretFile != "" {
-		authFile = i.PullSecretFile
-	}
+	i.log.Info("Starting recert full flow")
 
 	err := i.ops.RecertFullFlow(
 		i.recertImage,
-		authFile,
-		path.Join(i.workingDir, recert.RecertConfigFile),
+		clusterData.PullSecretFile,
+		path.Join(common.LCAWorkspaceDir, recert.RecertConfigFile),
 		nil,
 		nil,
-		"-v", fmt.Sprintf("%s:%s", i.workingDir, i.workingDir),
+		"-v", fmt.Sprintf("%s:%s", common.LCAWorkspaceDir, common.LCAWorkspaceDir),
 	)
 	if err != nil {
 		return fmt.Errorf("failed recert full flow: %w", err)
@@ -322,9 +352,9 @@ func selectIPOfSameFamily(newIP string, candidates []string) (string, error) {
 // ipFamilyOfString returns "IPv6" if the IP contains a colon, otherwise "IPv4"
 func ipFamilyOfString(ip string) string {
 	if strings.Contains(ip, ":") {
-		return IPv6FamilyName
+		return common.IPv6FamilyName
 	}
-	return IPv4FamilyName
+	return common.IPv4FamilyName
 }
 
 func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
@@ -343,6 +373,8 @@ func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
 				return port, nil
 			}
 		}
+	} else {
+		i.log.Debugf("failed to query ovs-vsctl list-ports %s: %v", BridgeExternalName, err)
 	}
 
 	return "", fmt.Errorf("no connected network interface found")
@@ -380,19 +412,43 @@ func (i *IPConfigHandler) ensureNodeIPRerunService(newMachineNetwork string) err
 	return nil
 }
 
-func (i *IPConfigHandler) configureDNSMasqOverride() error {
-	primaryIP := i.IPConfigs[0].IP
-	i.log.Infof("Setting new dnsmasq configuration for %s", primaryIP)
+func (i *IPConfigHandler) configureDNSMasq(ctx context.Context) error {
+	overrideIP := ""
+	for _, cfg := range i.IPConfigs {
+		if cfg != nil && cfg.IP != "" && ipFamilyOfString(cfg.IP) == i.DNSIPFamily {
+			overrideIP = cfg.IP
+			break
+		}
+	}
+
+	if overrideIP == "" && len(i.IPConfigs) > 0 && i.IPConfigs[0] != nil {
+		overrideIP = i.IPConfigs[0].IP
+	}
+
+	if overrideIP == "" {
+		return fmt.Errorf("no IP available to configure dnsmasq overrides")
+	}
+	i.log.Infof("Setting new dnsmasq configuration for %s ", overrideIP)
 
 	config := []string{
-		fmt.Sprintf("SNO_DNSMASQ_IP_OVERRIDE=%s", primaryIP),
+		fmt.Sprintf("%s=%s", common.DnsmasqOverrideEnvKey, overrideIP),
 	}
 
-	if err := os.WriteFile(common.PathOutsideChroot(common.DnsmasqOverrides), []byte(strings.Join(config, "\n")), 0o600); err != nil {
-		return fmt.Errorf("failed to set dnsmasq overrides, err %w", err)
+	if err := os.WriteFile(
+		common.PathOutsideChroot(common.DnsmasqOverrides),
+		[]byte(strings.Join(config, "\n")),
+		common.FileMode0600,
+	); err != nil {
+		return fmt.Errorf("failed to set dnsmasq overrides: %w", err)
 	}
 
-	i.log.Infof("DNSMasq override configured with IP: %s", primaryIP)
+	if i.DNSIPFamily != "" {
+		if err := i.setDNSMasqFilterInMachineConfig(ctx); err != nil {
+			return fmt.Errorf("failed to update dnsmasq filter in machine config: %w", err)
+		}
+	}
+
+	i.log.Infof("DNSMasq override configured with IP: %s", overrideIP)
 
 	return nil
 }
@@ -427,7 +483,7 @@ func (i *IPConfigHandler) removeStaleFilesForRegeneration() error {
 		common.OvsConfDbLock,
 	}
 	if err := utils.RemoveListOfFiles(i.log, files); err != nil {
-		return fmt.Errorf("failed to remove stale files for regeneration in %s: %w", files, err)
+		return fmt.Errorf("failed to remove stale files for regeneration in %v: %w", files, err)
 	}
 	return nil
 }
@@ -552,13 +608,14 @@ func (i *IPConfigHandler) CreateNetworkConfiguration(ctx context.Context) error 
 	return nil
 }
 
-// waitForMCPMasterUpdated mirrors the shell logic: first detect updating/rendered change, then wait for Updated=True and Degraded!=True with new rendered.
+// waitForMCPMasterUpdated mirrors the shell logic: first detect updating/rendered change,
+// then wait for Updated=True and Degraded!=True with new rendered.
 func (i *IPConfigHandler) waitForMCPMasterUpdated(ctx context.Context) error {
 	i.log.Info("Waiting for MachineConfigPool/master to roll out a new rendered configuration")
 
 	// Fetch initial rendered name
 	mcp := &machineconfigv1.MachineConfigPool{}
-	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: "master"}, mcp); err != nil {
+	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: MCPMasterName}, mcp); err != nil {
 		return fmt.Errorf("failed to get mcp/master: %w", err)
 	}
 	prevRendered := ""
@@ -572,14 +629,13 @@ func (i *IPConfigHandler) waitForMCPMasterUpdated(ctx context.Context) error {
 	deadlineCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
-	// Phase 1: wait for either updating or rendered change
 	phase1 := func() (bool, error) {
-		if err := i.runtimeClient.Get(deadlineCtx, types.NamespacedName{Name: "master"}, mcp); err != nil {
+		if err := i.runtimeClient.Get(deadlineCtx, types.NamespacedName{Name: MCPMasterName}, mcp); err != nil {
 			i.log.Warnf("failed to get mcp/master: %v", err)
 			return false, nil
 		}
 		rendered := mcp.Status.Configuration.Name
-		updating := mcpConditionStatus(mcp.Status.Conditions, "Updating")
+		updating := mcpConditionStatus(mcp.Status.Conditions, MCPConditionUpdating)
 		if rendered != prevRendered || updating == "True" {
 			return true, nil
 		}
@@ -594,13 +650,13 @@ func (i *IPConfigHandler) waitForMCPMasterUpdated(ctx context.Context) error {
 
 	// Phase 2: wait for Updated=True, Degraded!=True and rendered changed
 	if err := wait.PollUntilContextTimeout(deadlineCtx, 10*time.Second, 15*time.Minute, true, func(ctx context.Context) (bool, error) {
-		if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: "master"}, mcp); err != nil {
+		if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: MCPMasterName}, mcp); err != nil {
 			i.log.Warnf("failed to get mcp/master: %v", err)
 			return false, nil
 		}
 		rendered := mcp.Status.Configuration.Name
-		updated := mcpConditionStatus(mcp.Status.Conditions, "Updated")
-		degraded := mcpConditionStatus(mcp.Status.Conditions, "Degraded")
+		updated := mcpConditionStatus(mcp.Status.Conditions, MCPConditionUpdated)
+		degraded := mcpConditionStatus(mcp.Status.Conditions, MCPConditionDegraded)
 		if rendered != "" && rendered != prevRendered && updated == "True" && degraded != "True" {
 			i.log.Infof("MachineConfigPool master rolled out new rendered %s (previous %s)", rendered, prevRendered)
 			return true, nil
@@ -628,7 +684,7 @@ func (i *IPConfigHandler) waitForNodeToApplyRenderedMC(ctx context.Context) erro
 	// Helper to fetch current MCP rendered name (may change during wait)
 	getRendered := func(ctx context.Context) string {
 		mcp := &machineconfigv1.MachineConfigPool{}
-		if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: "master"}, mcp); err != nil {
+		if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: MCPMasterName}, mcp); err != nil {
 			return ""
 		}
 		return mcp.Status.Configuration.Name
@@ -642,8 +698,8 @@ func (i *IPConfigHandler) waitForNodeToApplyRenderedMC(ctx context.Context) erro
 			return false, nil
 		}
 		ann := node.GetAnnotations()
-		desired := ann["machineconfiguration.openshift.io/desiredConfig"]
-		current := ann["machineconfiguration.openshift.io/currentConfig"]
+		desired := ann[MachineConfigDesiredAnnoKey]
+		current := ann[MachineConfigCurrentAnnoKey]
 
 		if rendered != "" {
 			if desired == rendered && current == rendered {
@@ -670,13 +726,6 @@ func mcpConditionStatus(conds []machineconfigv1.MachineConfigPoolCondition, cond
 	return ""
 }
 
-func (i *IPConfigHandler) createWorkingDir() error {
-	if err := os.MkdirAll(i.workingDir, 0o755); err != nil {
-		return fmt.Errorf("failed to ensure working directory %s: %w", i.workingDir, err)
-	}
-	return nil
-}
-
 func (i *IPConfigHandler) createCryptoDir(cryptoDir string) error {
 	if err := os.MkdirAll(cryptoDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create crypto directory: %w", err)
@@ -689,5 +738,105 @@ func (i *IPConfigHandler) collectKubeConfigCrypto(ctx context.Context, cryptoDir
 	if err := utils.BackupKubeconfigCrypto(ctx, i.runtimeClient, cryptoDir); err != nil {
 		return fmt.Errorf("failed to collect kubeconfig crypto: %w", err)
 	}
+	return nil
+}
+
+// materializeAuthFileFromPullSecretRef fetches the dockerconfigjson secret by name in the LCA namespace
+// and writes it to an auth file under the LCA workspace, returning the path to the file.
+func materializeAuthFileFromPullSecretRef(
+	ctx context.Context,
+	client runtimeclient.Client,
+	secretName string,
+) (string, error) {
+	secret := &corev1.Secret{}
+	if err := client.Get(ctx, types.NamespacedName{
+		Namespace: common.LcaNamespace,
+		Name:      secretName,
+	}, secret); err != nil {
+		return "", fmt.Errorf("failed to fetch pull secret %s/%s: %w", common.LcaNamespace, secretName, err)
+	}
+	dockercfg, ok := secret.Data[corev1.DockerConfigJsonKey]
+	if !ok || len(dockercfg) == 0 {
+		return "", fmt.Errorf("secret %s/%s missing key %s", common.LcaNamespace, secretName, corev1.DockerConfigJsonKey)
+	}
+	authPath := path.Join(common.LCAWorkspaceDir, "recert-pull-secret.json")
+	if err := os.WriteFile(common.PathOutsideChroot(authPath), dockercfg, 0o600); err != nil {
+		return "", fmt.Errorf("failed to write pull secret auth file: %w", err)
+	}
+	return authPath, nil
+}
+
+func (i *IPConfigHandler) setDNSMasqFilterInMachineConfig(
+	ctx context.Context,
+) error {
+	var filterLine string
+	switch i.DNSIPFamily {
+	case common.IPv4FamilyName:
+		filterLine = common.DnsmasqFilterIPv4
+	case common.IPv6FamilyName:
+		filterLine = common.DnsmasqFilterIPv6
+	default:
+		return fmt.Errorf("unsupported DNS IP family: %s", i.DNSIPFamily)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString([]byte(filterLine))
+	source := fmt.Sprintf(common.DataURLBase64Template, encoded)
+
+	existingMC := &machineconfigv1.MachineConfig{}
+	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: common.DnsmasqMachineConfigName}, existingMC); err != nil {
+		return fmt.Errorf("failed to get existing machine config %s: %w", common.DnsmasqMachineConfigName, err)
+	}
+
+	var cfg igntypes.Config
+	if len(existingMC.Spec.Config.Raw) > 0 {
+		if err := json.Unmarshal(existingMC.Spec.Config.Raw, &cfg); err != nil {
+			return fmt.Errorf("failed to parse ignition config in %s: %w", common.DnsmasqMachineConfigName, err)
+		}
+	}
+	if cfg.Ignition.Version == "" {
+		cfg.Ignition.Version = common.IgnitionVersion32
+	}
+
+	trueVal := true
+	modeVal := common.FileMode0644
+	newFile := igntypes.File{
+		Node: igntypes.Node{
+			Path:      common.DnsmasqFilterTargetPath,
+			Overwrite: &trueVal,
+		},
+		FileEmbedded1: igntypes.FileEmbedded1{
+			Mode: &modeVal,
+			Contents: igntypes.Resource{
+				Source: &source,
+			},
+		},
+	}
+
+	updated := false
+	for idx, f := range cfg.Storage.Files {
+		if f.Path == common.DnsmasqFilterTargetPath {
+			if f.Contents.Source != nil && *f.Contents.Source == source {
+				i.log.Infof("DNSMasq filter already set in machine config %s", common.DnsmasqMachineConfigName)
+				return nil
+			}
+			cfg.Storage.Files[idx] = newFile
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		cfg.Storage.Files = append(cfg.Storage.Files, newFile)
+	}
+
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated ignition for %s: %w", common.DnsmasqMachineConfigName, err)
+	}
+	existingMC.Spec.Config = runtime.RawExtension{Raw: raw}
+
+	if err := i.runtimeClient.Update(ctx, existingMC); err != nil {
+		return fmt.Errorf("failed to update machine config %s: %w", common.DnsmasqMachineConfigName, err)
+	}
+
 	return nil
 }

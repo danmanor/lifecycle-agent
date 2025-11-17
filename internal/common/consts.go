@@ -153,6 +153,30 @@ const (
 	DnsmasqOverrides = "/etc/default/sno_dnsmasq_configuration_overrides"
 
 	IPConfigName = "ipconfig"
+
+	// DNS family names
+	IPv4FamilyName = "ipv4"
+	IPv6FamilyName = "ipv6"
+)
+
+// DNSMasq-related constants
+const (
+	// MachineConfig name that carries dnsmasq configuration
+	DnsmasqMachineConfigName = "50-master-dnsmasq-configuration"
+	// Path where the single-node filter configuration is placed
+	DnsmasqFilterTargetPath = "/etc/dnsmasq.d/single-node-filter.conf"
+	// Filter directives based on IP family
+	DnsmasqFilterIPv4 = "filter-AAAA\n"
+	DnsmasqFilterIPv6 = "filter-A\n"
+	// Data URL template used for embedding file contents in ignition
+	DataURLBase64Template = "data:text/plain;charset=utf-8;base64,%s"
+	// Ignition version used when creating/updating configs
+	IgnitionVersion32 = "3.2.0"
+	// Environment key written to dnsmasq override file
+	DnsmasqOverrideEnvKey = "SNO_DNSMASQ_IP_OVERRIDE"
+	// Common file permission modes
+	FileMode0644 = 420 // 0644
+	FileMode0600 = 384 // 0600
 )
 
 // Annotation names and values related to extra manifest

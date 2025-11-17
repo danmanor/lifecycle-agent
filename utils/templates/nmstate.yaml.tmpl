@@ -31,7 +31,11 @@ interfaces:
     options:
       mcast-snooping-enable: true
     port:
+    {{- if gt .VLANID 0 }}
     - name: {{ .VLANIfaceName }}
+    {{- else }}
+    - name: {{ .InterfaceName }}
+    {{- end }}
     - name: br-ex
 - name: br-ex
   type: ovs-interface
@@ -39,35 +43,39 @@ interfaces:
   copy-mac-from: {{ .InterfaceName }}
   ipv4:
     enabled: {{ .IPv4.Enabled }}
-    dhcp: {{ .IPv4.DHCPEnabled }}{{ if .IPv4.Enabled }}
+    dhcp: false
+    {{- if .IPv4.Enabled }}
     address:
     - ip: {{ .IPv4.Address }}
       prefix-length: {{ .IPv4.PrefixLen }}
-    auto-route-metric: 48{{ end }}
+    {{- end }}
   ipv6:
     enabled: {{ .IPv6.Enabled }}
-    dhcp: {{ .IPv6.DHCPEnabled }}{{ if .IPv6.Enabled }}
+    dhcp: false
+    {{- if .IPv6.Enabled }}
     address:
     - ip: {{ .IPv6.Address }}
       prefix-length: {{ .IPv6.PrefixLen }}
-    auto-route-metric: 48{{ end }}
-{{- if or .IPv4.Gateway .IPv6.Gateway .IPv4.DNSServer .IPv6.DNSServer }}
+    {{- end }}
+{{- if or .IPv4.Gateway .IPv6.Gateway }}
 routes:
   config:
   {{- if .IPv4.Gateway }}
   - destination: 0.0.0.0/0
     next-hop-interface: br-ex
     next-hop-address: {{ .IPv4.Gateway }}
-    metric: 100
+    metric: 48
     table-id: 254
   {{- end }}
   {{- if .IPv6.Gateway }}
   - destination: ::/0
     next-hop-interface: br-ex
     next-hop-address: {{ .IPv6.Gateway }}
-    metric: 1024
+    metric: 48
     table-id: 254
   {{- end }}
+{{- end }}
+{{- if or .IPv4.DNSServer .IPv6.DNSServer }}
 dns-resolver:
   config:
     server:

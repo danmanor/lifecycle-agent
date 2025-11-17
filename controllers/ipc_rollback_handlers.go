@@ -187,7 +187,7 @@ func (r *IPConfigRollbackPhasesHandler) PrePivot(
 
 	// should not reach here on successful ip-config rollback
 
-	return doNotRequeue(), nil
+	return requeueWithShortInterval(), nil
 }
 
 func (r *IPConfigRollbackPhasesHandler) PostPivot(

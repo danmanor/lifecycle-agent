@@ -96,20 +96,6 @@ func (mr *MockOpsMockRecorder) EnableClusterServices(root any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableClusterServices", reflect.TypeOf((*MockOps)(nil).EnableClusterServices), root)
 }
 
-// EnsureNMStateConfigurationServiceEnabled mocks base method.
-func (m *MockOps) EnsureNMStateConfigurationServiceEnabled() error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "EnsureNMStateConfigurationServiceEnabled")
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// EnsureNMStateConfigurationServiceEnabled indicates an expected call of EnsureNMStateConfigurationServiceEnabled.
-func (mr *MockOpsMockRecorder) EnsureNMStateConfigurationServiceEnabled() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnsureNMStateConfigurationServiceEnabled", reflect.TypeOf((*MockOps)(nil).EnsureNMStateConfigurationServiceEnabled))
-}
-
 // ExtractTarWithSELinux mocks base method.
 func (m *MockOps) ExtractTarWithSELinux(srcPath, destPath string) error {
 	m.ctrl.T.Helper()
