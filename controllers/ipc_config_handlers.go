@@ -139,29 +139,12 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 	logger logr.Logger,
 ) (ctrl.Result, error) {
 	if err := statusIPsMatchSpec(ipc); err == nil {
-		controllerutils.SetIPConfigStatusCompleted(ipc, "IPConfig status matches spec; nothing to do")
+		controllerutils.SetIPConfigStatusCompleted(ipc, "Spec and status match; nothing to do")
 		if err := h.Client.Status().Update(ctx, ipc); err != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
+
 		logger.Info("IPConfig status matches spec")
-		return doNotRequeue(), nil
-	}
-
-	if onlyDNSResolutionFamilyChanged(ipc) {
-		logger.Info("Only DNSResolutionFamily changed; applying dnsmasq filter only")
-		if err := common.SetDNSMasqFilterInMachineConfig(ctx, h.Client, ipc.Spec.DNSResolutionFamily); err != nil {
-			controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to update dnsmasq filter: %s", err.Error()))
-			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
-				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
-			}
-			return requeueWithError(fmt.Errorf("failed to update dnsmasq filter in machine config: %w", err))
-		}
-
-		ipc.Status.DNSResolutionFamily = ipc.Spec.DNSResolutionFamily
-		controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed successfully")
-		if err := h.Client.Status().Update(ctx, ipc); err != nil {
-			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
-		}
 
 		return doNotRequeue(), nil
 	}
@@ -177,42 +160,6 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 	}
 
 	return result, nil
-}
-
-// onlyDNSResolutionFamilyChanged returns true when the only requested change is DNSResolutionFamily.
-// It requires that no IPv4/IPv6/VLAN changes are requested compared to status.
-func onlyDNSResolutionFamilyChanged(ipc *ipcv1.IPConfig) bool {
-	if ipc.Spec.DNSResolutionFamily == "" || ipc.Spec.DNSResolutionFamily == ipc.Status.DNSResolutionFamily {
-		return false
-	}
-
-	if ipc.Status.Network == nil ||
-		ipc.Status.Network.HostNetwork == nil ||
-		ipc.Status.Network.ClusterNetwork == nil {
-		return false
-	}
-
-	if ipc.Spec.VLAN != nil &&
-		ipc.Status.Network.HostNetwork.VLANID != ipc.Spec.VLAN.ID {
-		return false
-	}
-
-	if !familySpecMatchesStatus(
-		ipc.Spec.IPv4,
-		ipc.Status.Network.HostNetwork.IPv4,
-		ipc.Status.Network.ClusterNetwork.IPv4,
-	) {
-		return false
-	}
-	if !familySpecMatchesStatus(
-		ipc.Spec.IPv6,
-		ipc.Status.Network.HostNetwork.IPv6,
-		ipc.Status.Network.ClusterNetwork.IPv6,
-	) {
-		return false
-	}
-
-	return true
 }
 
 // familySpecMatchesStatus checks that the requested IP family spec does not introduce changes
@@ -598,11 +545,9 @@ func (h *IPConfigConfigPhasesHandler) disableNodeipRerunUnit() error {
 func statusIPsMatchSpec(ipc *ipcv1.IPConfig) error {
 	mismatches := []string{}
 
-	if ipc.Spec.IPv4 == nil && ipc.Spec.IPv6 == nil {
-		return fmt.Errorf("nothing requested, shouldn't happen")
-	}
-
-	if ipc.Status.Network == nil || ipc.Status.Network.HostNetwork == nil || ipc.Status.Network.ClusterNetwork == nil {
+	if ipc.Status.Network == nil ||
+		ipc.Status.Network.HostNetwork == nil ||
+		ipc.Status.Network.ClusterNetwork == nil {
 		return fmt.Errorf("host/cluster network not yet populated")
 	}
 

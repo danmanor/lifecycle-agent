@@ -48,7 +48,6 @@ type IPConfig struct {
 type NMStateTemplateData struct {
 	InterfaceName string
 	VLANID        int
-	VLANIfaceName string
 	IPv4          IPConfig
 	IPv6          IPConfig
 }
@@ -73,10 +72,6 @@ func GenerateNMStateYAML(config *NMStateConfig) (string, error) {
 			Enabled:     false,
 			DHCPEnabled: false,
 		},
-	}
-
-	if config.VLANID > 0 {
-		templateData.VLANIfaceName = fmt.Sprintf("%s.%d", config.InterfaceName, config.VLANID)
 	}
 
 	if config.IPv4Config != nil {

@@ -1,23 +1,19 @@
 interfaces:
 - name: {{ .InterfaceName }}
-  type: ethernet
-  state: up
-  ipv4:
-    enabled: false
-  ipv6:
-    enabled: false
-{{- if gt .VLANID 0 }}
-- name: {{ .VLANIfaceName }}
+  {{- if gt .VLANID 0 }}
   type: vlan
+  {{- else }}
+  type: ethernet
+  {{- end }}
   state: up
+  {{- if gt .VLANID 0 }}
   vlan:
     id: {{ .VLANID }}
-    base-iface: {{ .InterfaceName }}
+  {{- end }}
   ipv4:
     enabled: false
   ipv6:
     enabled: false
-{{- end }}
 - name: br-ex
   type: ovs-bridge
   state: up
@@ -31,11 +27,7 @@ interfaces:
     options:
       mcast-snooping-enable: true
     port:
-    {{- if gt .VLANID 0 }}
-    - name: {{ .VLANIfaceName }}
-    {{- else }}
     - name: {{ .InterfaceName }}
-    {{- end }}
     - name: br-ex
 - name: br-ex
   type: ovs-interface

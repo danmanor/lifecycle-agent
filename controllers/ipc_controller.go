@@ -83,6 +83,11 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		"namespace", req.NamespacedName.Namespace,
 	)
 
+	// Ensure the workspace directory exists once at the start of reconcile
+	if err := os.MkdirAll(common.PathOutsideChroot(common.LCAWorkspaceDir), 0o700); err != nil {
+		return requeueWithError(fmt.Errorf("failed to create workspace dir: %w", err))
+	}
+
 	ipc, err := r.getIPConfig(ctx, logger)
 	if err != nil {
 		return requeueWithError(fmt.Errorf("failed to get IPConfig: %w", err))
@@ -120,8 +125,8 @@ func (r *IPConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
-	if err := r.refreshHostAndClusterNetwork(ctx, ipc); err != nil {
-		return requeueWithError(fmt.Errorf("failed to refresh host/cluster network: %w", err))
+	if err := r.refreshStatus(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to refresh status: %w", err))
 	}
 
 	if err := r.Client.Status().Update(ctx, ipc); err != nil {
@@ -214,7 +219,7 @@ func isTargetStaterootBooted(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclien
 // buildIPConfigStaterootName mirrors the lca-cli ip-config prepare naming scheme: rhcos_<ipv4>_<ipv6>[_vlan<ID>]
 // where IPs are sanitized to alphanumeric and dashes, IPv6 brackets are stripped, and VLAN suffix is added if specified.
 func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
-	var ipv4, ipv6 string
+	var ipv4, ipv6, vlan string
 	if ipc.Spec.IPv4 != nil {
 		ipv4 = ipc.Spec.IPv4.Address
 	}
@@ -223,7 +228,6 @@ func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
 		ipv6 = ipc.Spec.IPv6.Address
 	}
 
-	var vlan string
 	if ipc.Spec.VLAN != nil {
 		vlan = strconv.Itoa(ipc.Spec.VLAN.ID)
 	}
@@ -445,8 +449,7 @@ type nmVLAN struct {
 	ID        int    `json:"id"`
 }
 
-// refreshHostAndClusterNetwork orchestrates nmstate collection and status population
-func (r *IPConfigReconciler) refreshHostAndClusterNetwork(ctx context.Context, ipc *ipcv1.IPConfig) error {
+func (r *IPConfigReconciler) refreshStatus(ctx context.Context, ipc *ipcv1.IPConfig) error {
 	output, err := r.nmstateShowJSON()
 	if err != nil {
 		return err
@@ -703,14 +706,18 @@ func buildHostAndCluster(
 		}
 	}
 
-	host.IPv4 = &ipcv1.HostIPStatus{
-		Gateway:   gw4,
-		DNSServer: dnsV4,
+	if gw4 != "" || dnsV4 != "" {
+		host.IPv4 = &ipcv1.HostIPStatus{
+			Gateway:   gw4,
+			DNSServer: dnsV4,
+		}
 	}
 
-	host.IPv6 = &ipcv1.HostIPStatus{
-		Gateway:   gw6,
-		DNSServer: dnsV6,
+	if gw6 != "" || dnsV6 != "" {
+		host.IPv6 = &ipcv1.HostIPStatus{
+			Gateway:   gw6,
+			DNSServer: dnsV6,
+		}
 	}
 
 	if vlanID != nil {

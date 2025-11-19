@@ -79,7 +79,7 @@ const (
 	IPConfigRunStatusFile      = LCAWorkspaceDir + "/ip-config-run-status.json"
 	IPConfigPrepareStatusFile  = LCAWorkspaceDir + "/ip-config-prepare-status.json"
 	IPConfigRollbackStatusFile = LCAWorkspaceDir + "/ip-config-rollback-status.json"
-	IPCAutoRollbackConfigFile  = LCAWorkspaceDir + "/ipconfig_autorollback_config.json"
+	IPCAutoRollbackConfigFile  = LCAWorkspaceDir + "/ip-config-autorollback-config.json"
 
 	IBUAutoRollbackConfigFile                       = LCAConfigDir + "/autorollback_config.json"
 	IBUAutoRollbackInitMonitorTimeoutDefaultSeconds = 1800 // 30 minutes
