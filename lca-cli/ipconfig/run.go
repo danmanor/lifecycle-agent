@@ -3,7 +3,6 @@ package ipconfig
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -20,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	igntypes "github.com/coreos/ignition/v2/config/v3_2/types"
 	"github.com/openshift-kni/lifecycle-agent/internal/common"
 	"github.com/openshift-kni/lifecycle-agent/internal/recert"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
@@ -443,7 +441,7 @@ func (i *IPConfigHandler) configureDNSMasq(ctx context.Context) error {
 	}
 
 	if i.DNSIPFamily != "" {
-		if err := i.setDNSMasqFilterInMachineConfig(ctx); err != nil {
+		if err := common.SetDNSMasqFilterInMachineConfig(ctx, i.runtimeClient, i.DNSIPFamily); err != nil {
 			return fmt.Errorf("failed to update dnsmasq filter in machine config: %w", err)
 		}
 	}
@@ -764,79 +762,4 @@ func materializeAuthFileFromPullSecretRef(
 		return "", fmt.Errorf("failed to write pull secret auth file: %w", err)
 	}
 	return authPath, nil
-}
-
-func (i *IPConfigHandler) setDNSMasqFilterInMachineConfig(
-	ctx context.Context,
-) error {
-	var filterLine string
-	switch i.DNSIPFamily {
-	case common.IPv4FamilyName:
-		filterLine = common.DnsmasqFilterIPv4
-	case common.IPv6FamilyName:
-		filterLine = common.DnsmasqFilterIPv6
-	default:
-		return fmt.Errorf("unsupported DNS IP family: %s", i.DNSIPFamily)
-	}
-
-	encoded := base64.StdEncoding.EncodeToString([]byte(filterLine))
-	source := fmt.Sprintf(common.DataURLBase64Template, encoded)
-
-	existingMC := &machineconfigv1.MachineConfig{}
-	if err := i.runtimeClient.Get(ctx, types.NamespacedName{Name: common.DnsmasqMachineConfigName}, existingMC); err != nil {
-		return fmt.Errorf("failed to get existing machine config %s: %w", common.DnsmasqMachineConfigName, err)
-	}
-
-	var cfg igntypes.Config
-	if len(existingMC.Spec.Config.Raw) > 0 {
-		if err := json.Unmarshal(existingMC.Spec.Config.Raw, &cfg); err != nil {
-			return fmt.Errorf("failed to parse ignition config in %s: %w", common.DnsmasqMachineConfigName, err)
-		}
-	}
-	if cfg.Ignition.Version == "" {
-		cfg.Ignition.Version = common.IgnitionVersion32
-	}
-
-	trueVal := true
-	modeVal := common.FileMode0644
-	newFile := igntypes.File{
-		Node: igntypes.Node{
-			Path:      common.DnsmasqFilterTargetPath,
-			Overwrite: &trueVal,
-		},
-		FileEmbedded1: igntypes.FileEmbedded1{
-			Mode: &modeVal,
-			Contents: igntypes.Resource{
-				Source: &source,
-			},
-		},
-	}
-
-	updated := false
-	for idx, f := range cfg.Storage.Files {
-		if f.Path == common.DnsmasqFilterTargetPath {
-			if f.Contents.Source != nil && *f.Contents.Source == source {
-				i.log.Infof("DNSMasq filter already set in machine config %s", common.DnsmasqMachineConfigName)
-				return nil
-			}
-			cfg.Storage.Files[idx] = newFile
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		cfg.Storage.Files = append(cfg.Storage.Files, newFile)
-	}
-
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal updated ignition for %s: %w", common.DnsmasqMachineConfigName, err)
-	}
-	existingMC.Spec.Config = runtime.RawExtension{Raw: raw}
-
-	if err := i.runtimeClient.Update(ctx, existingMC); err != nil {
-		return fmt.Errorf("failed to update machine config %s: %w", common.DnsmasqMachineConfigName, err)
-	}
-
-	return nil
 }

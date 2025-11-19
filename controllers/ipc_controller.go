@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -40,7 +41,7 @@ import (
 
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=lca.openshift.io,resources=ipconfigs/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=machineconfiguration.openshift.io,resources=machineconfigs,verbs=get;list;watch
+//+kubebuilder:rbac:groups=machineconfiguration.openshift.io,resources=machineconfigs,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get
@@ -210,8 +211,8 @@ func isTargetStaterootBooted(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclien
 	return booted
 }
 
-// buildIPConfigStaterootName mirrors the lca-cli ip-config prepare naming scheme: rhcos_<ipv4>_<ipv6>
-// where IPs are sanitized to alphanumeric and dashes, and IPv6 brackets are stripped.
+// buildIPConfigStaterootName mirrors the lca-cli ip-config prepare naming scheme: rhcos_<ipv4>_<ipv6>[_vlan<ID>]
+// where IPs are sanitized to alphanumeric and dashes, IPv6 brackets are stripped, and VLAN suffix is added if specified.
 func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
 	var ipv4, ipv6 string
 	if ipc.Spec.IPv4 != nil {
@@ -222,7 +223,12 @@ func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
 		ipv6 = ipc.Spec.IPv6.Address
 	}
 
-	return common.BuildNewStaterootNameFromIps(ipv4, ipv6)
+	var vlan string
+	if ipc.Spec.VLAN != nil {
+		vlan = strconv.Itoa(ipc.Spec.VLAN.ID)
+	}
+
+	return common.BuildNewStaterootNameFromIpsAndVlan(ipv4, ipv6, vlan)
 }
 
 // SetupWithManager sets up the controller with the Manager.

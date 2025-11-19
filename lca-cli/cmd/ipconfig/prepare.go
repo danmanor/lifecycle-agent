@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"strconv"
+
 	"github.com/go-logr/logr"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
 	"github.com/sirupsen/logrus"
@@ -49,6 +51,7 @@ var (
 
 	newIPv4            string
 	newIPv6            string
+	newVLANID          int
 	installInitMonitor bool
 )
 
@@ -58,6 +61,7 @@ func init() {
 
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv4, "ipv4-address", "", "New IPv4 address")
 	ipConfigPrepareCmd.Flags().StringVar(&newIPv6, "ipv6-address", "", "New IPv6 address")
+	ipConfigPrepareCmd.Flags().IntVar(&newVLANID, "vlan-id", 0, "VLAN ID to suffix the stateroot name with (optional)")
 	ipConfigPrepareCmd.Flags().BoolVar(
 		&installInitMonitor,
 		"install-init-monitor",
@@ -108,7 +112,7 @@ func runIPConfigPrepare() error {
 		opsInterface,
 	)
 
-	ostreeData, err := getOstreeData(newIPv4, newIPv6, rpmClient, ostreeClient, pkgLog)
+	ostreeData, err := getOstreeData(newIPv4, newIPv6, newVLANID, rpmClient, ostreeClient, pkgLog)
 	if err != nil {
 		return fmt.Errorf("failed to get ostree data: %w", err)
 	}
@@ -256,6 +260,7 @@ func cleanupMonitorInitializationServiceInOldStateroot(
 
 func getOstreeData(
 	newIPv4, newIPv6 string,
+	newVLANID int,
 	rpmOstree rpmOstree.IClient,
 	ostree intOstree.IClient,
 	logger *logrus.Logger,
@@ -269,7 +274,7 @@ func getOstreeData(
 	}
 	ostreeData.OldStateroot = currentStaterootData
 
-	newStaterootData, err := getNewStaterootData(newIPv4, newIPv6, ostree, logger)
+	newStaterootData, err := getNewStaterootData(newIPv4, newIPv6, newVLANID, ostree, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get new stateroot data: %w", err)
 	}
@@ -306,12 +311,18 @@ func getCurrentStaterootData(rpmOstree rpmOstree.IClient, ostree intOstree.IClie
 
 func getNewStaterootData(
 	newIPv4, newIPv6 string,
+	newVLANID int,
 	ostree intOstree.IClient,
 	logger *logrus.Logger,
 ) (*ipconfig.StaterootData, error) {
 	staterootData := &ipconfig.StaterootData{}
 
-	newStaterootName := common.BuildNewStaterootNameFromIps(newIPv4, newIPv6)
+	var vlan string
+	if newVLANID > 0 {
+		vlan = strconv.Itoa(newVLANID)
+	}
+
+	newStaterootName := common.BuildNewStaterootNameFromIpsAndVlan(newIPv4, newIPv6, vlan)
 	staterootData.Name = newStaterootName
 
 	staterootData.Path = common.GetStaterootPath(newStaterootName)

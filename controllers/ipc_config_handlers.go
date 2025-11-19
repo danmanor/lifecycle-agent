@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
@@ -146,6 +147,25 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 		return doNotRequeue(), nil
 	}
 
+	if onlyDNSResolutionFamilyChanged(ipc) {
+		logger.Info("Only DNSResolutionFamily changed; applying dnsmasq filter only")
+		if err := common.SetDNSMasqFilterInMachineConfig(ctx, h.Client, ipc.Spec.DNSResolutionFamily); err != nil {
+			controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to update dnsmasq filter: %s", err.Error()))
+			if uerr := h.Client.Status().Update(ctx, ipc); uerr != nil {
+				return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
+			}
+			return requeueWithError(fmt.Errorf("failed to update dnsmasq filter in machine config: %w", err))
+		}
+
+		ipc.Status.DNSResolutionFamily = ipc.Spec.DNSResolutionFamily
+		controllerutils.SetIPConfigStatusCompleted(ipc, "Configuration completed successfully")
+		if err := h.Client.Status().Update(ctx, ipc); err != nil {
+			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+		}
+
+		return doNotRequeue(), nil
+	}
+
 	controllerutils.SetIPConfigStatusInProgress(ipc, "Configuration preparation is in progress")
 	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -158,6 +178,75 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 
 	return result, nil
 }
+
+// onlyDNSResolutionFamilyChanged returns true when the only requested change is DNSResolutionFamily.
+// It requires that no IPv4/IPv6/VLAN changes are requested compared to status.
+func onlyDNSResolutionFamilyChanged(ipc *ipcv1.IPConfig) bool {
+	if ipc.Spec.DNSResolutionFamily == "" || ipc.Spec.DNSResolutionFamily == ipc.Status.DNSResolutionFamily {
+		return false
+	}
+
+	if ipc.Status.Network == nil ||
+		ipc.Status.Network.HostNetwork == nil ||
+		ipc.Status.Network.ClusterNetwork == nil {
+		return false
+	}
+
+	if ipc.Spec.VLAN != nil &&
+		ipc.Status.Network.HostNetwork.VLANID != ipc.Spec.VLAN.ID {
+		return false
+	}
+
+	if !familySpecMatchesStatus(
+		ipc.Spec.IPv4,
+		ipc.Status.Network.HostNetwork.IPv4,
+		ipc.Status.Network.ClusterNetwork.IPv4,
+	) {
+		return false
+	}
+	if !familySpecMatchesStatus(
+		ipc.Spec.IPv6,
+		ipc.Status.Network.HostNetwork.IPv6,
+		ipc.Status.Network.ClusterNetwork.IPv6,
+	) {
+		return false
+	}
+
+	return true
+}
+
+// familySpecMatchesStatus checks that the requested IP family spec does not introduce changes
+// compared to current host and cluster status. It returns true when no change is needed.
+func familySpecMatchesStatus(
+	spec *ipcv1.IPFamilyConfig,
+	host *ipcv1.HostIPStatus,
+	cluster *ipcv1.ClusterIPStatus,
+) bool {
+	if spec == nil {
+		return true
+	}
+	if host == nil || cluster == nil || cluster.Address == "" {
+		return false
+	}
+	if spec.Gateway != "" && spec.Gateway != host.Gateway {
+		return false
+	}
+	if spec.DNSServer != "" && spec.DNSServer != host.DNSServer {
+		return false
+	}
+	if spec.Address != "" && !ipEqual(strings.Split(spec.Address, "/")[0], cluster.Address) {
+		return false
+	}
+	if spec.MachineNetwork != "" && !cidrEqual(spec.MachineNetwork, cluster.MachineNetwork) {
+		return false
+	}
+
+	return true
+}
+
+// setDNSMasqFilterInMachineConfig updates the dnsmasq MachineConfig to filter DNS answers
+// according to the desired IP family ("ipv4" or "ipv6").
+// setDNSMasqFilterInMachineConfig moved to internal/common; use common.SetDNSMasqFilterInMachineConfig
 
 func (h *IPConfigConfigStageHandler) handlePrepareRunning() (ctrl.Result, error) {
 	return requeueWithShortInterval(), nil
@@ -322,7 +411,11 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		monitorEnabled = false
 	}
 
-	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr, monitorEnabled); err != nil {
+	var vlanID int
+	if ipc.Spec.VLAN != nil {
+		vlanID = ipc.Spec.VLAN.ID
+	}
+	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr, vlanID, monitorEnabled); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config prepare: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -355,7 +448,8 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	if err := h.enableInitMonitorService(); err != nil {
+	requeue, err := h.enableInitMonitorService()
+	if err != nil {
 		controllerutils.SetIPConfigStatusFailed(
 			ipc,
 			fmt.Sprintf("failed to enable init monitor service: %s", err.Error()),
@@ -364,6 +458,9 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
 		}
 		return requeueWithError(fmt.Errorf("failed to enable init monitor service: %w", err))
+	}
+	if requeue {
+		return requeueWithCustomInterval(3 * time.Second), nil
 	}
 
 	if err := h.writeIPConfigRunConfig(ipc); err != nil {
@@ -396,14 +493,24 @@ func (h *IPConfigConfigPhasesHandler) PreConfiguration(
 }
 
 // enableInitMonitorService enables the init monitor service in the new stateroot.
-// the init monitor service is disabling itself upon finishing its work, but we need to reset it
-// for the next reboot.
-func (h *IPConfigConfigPhasesHandler) enableInitMonitorService() error {
-	if _, err := h.ChrootOps.SystemctlAction("enable", common.IPCInitMonitorService); err != nil {
-		return fmt.Errorf("failed to enable init monitor service: %w", err)
+// the init monitor service is disabling itself upon finishing its work, so we need to wait
+// for it and only then enable it again to ensure it is the last action performed.
+func (h *IPConfigConfigPhasesHandler) enableInitMonitorService() (bool, error) {
+	if _, err := h.ChrootOps.SystemctlAction("is-active", common.IPCInitMonitorService); err == nil {
+		if _, err := h.ChrootOps.SystemctlAction("stop", common.IPCInitMonitorService); err != nil {
+			return true, fmt.Errorf("failed to stop init monitor service: %w", err)
+		}
 	}
 
-	return nil
+	if _, err := h.ChrootOps.SystemctlAction("is-enabled", common.IPCInitMonitorService); err == nil {
+		return true, nil
+	}
+
+	if _, err := h.ChrootOps.SystemctlAction("enable", common.IPCInitMonitorService); err != nil {
+		return true, fmt.Errorf("failed to disable init monitor service: %w", err)
+	}
+
+	return false, nil
 }
 
 func (h *IPConfigConfigPhasesHandler) PostConfiguration(
@@ -479,9 +586,12 @@ func (h *IPConfigConfigPhasesHandler) PostConfiguration(
 }
 
 func (h *IPConfigConfigPhasesHandler) disableNodeipRerunUnit() error {
-	if _, err := h.ChrootOps.SystemctlAction("disable", utils.NodeipRerunUnitPath); err != nil {
-		return fmt.Errorf("failed to disable %s: %w", utils.NodeipRerunUnitPath, err)
+	if _, err := h.ChrootOps.SystemctlAction("is-enabled", utils.NodeipRerunUnitPath); err == nil {
+		if _, err := h.ChrootOps.SystemctlAction("disable", utils.NodeipRerunUnitPath); err != nil {
+			return fmt.Errorf("failed to disable %s: %w", utils.NodeipRerunUnitPath, err)
+		}
 	}
+
 	return nil
 }
 
@@ -722,6 +832,7 @@ func runLcaCliIPConfigPrepare(
 	logger logr.Logger,
 	ipv4Addr string,
 	ipv6Addr string,
+	vlanID int,
 	monitorEnabled bool,
 ) error {
 	logger.Info("Scheduling lca-cli ip-config prepare via systemd-run")
@@ -742,6 +853,9 @@ func runLcaCliIPConfigPrepare(
 	}
 	if ipv6Addr != "" {
 		args = append(args, "--ipv6-address", ipv6Addr)
+	}
+	if vlanID > 0 {
+		args = append(args, "--vlan-id", fmt.Sprintf("%d", vlanID))
 	}
 
 	if _, err := chrootOps.RunSystemdAction(args...); err != nil {

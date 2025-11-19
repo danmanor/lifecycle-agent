@@ -349,6 +349,21 @@ spec:
           rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
             && c.status==''True'') || has(oldSelf.spec.ipv6) && has(self.spec.ipv6)
             && oldSelf.spec.ipv6==self.spec.ipv6 || !has(self.spec.ipv6) && !has(oldSelf.spec.ipv6)'
+        - message: can not change spec.vlan while ipconfig is not idle
+          rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
+            && c.status==''True'') || has(oldSelf.spec.vlan) && has(self.spec.vlan)
+            && oldSelf.spec.vlan==self.spec.vlan || !has(self.spec.vlan) && !has(oldSelf.spec.vlan)'
+        - message: can not change spec.dnsResolutionFamily while ipconfig is not idle
+          rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
+            && c.status==''True'') || has(oldSelf.spec.dnsResolutionFamily) && has(self.spec.dnsResolutionFamily)
+            && oldSelf.spec.dnsResolutionFamily==self.spec.dnsResolutionFamily ||
+            !has(self.spec.dnsResolutionFamily) && !has(oldSelf.spec.dnsResolutionFamily)'
+        - message: can not change spec.autoRollbackOnFailure while ipconfig is not
+            idle
+          rule: '!has(oldSelf.status) || oldSelf.status.conditions.exists(c, c.type==''Idle''
+            && c.status==''True'') || has(oldSelf.spec.autoRollbackOnFailure) && has(self.spec.autoRollbackOnFailure)
+            && oldSelf.spec.autoRollbackOnFailure==self.spec.autoRollbackOnFailure
+            || !has(self.spec.autoRollbackOnFailure) && !has(oldSelf.spec.autoRollbackOnFailure)'
     served: true
     storage: true
     subresources:

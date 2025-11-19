@@ -218,15 +218,21 @@ func SanitizeForOsname(s string) string {
 	return re.ReplaceAllString(s, "_")
 }
 
-func BuildNewStaterootNameFromIps(ipv4, ipv6 string) string {
+// BuildNewStaterootNameFromIpsAndVlan builds a stateroot name from IPv4/IPv6 and optional VLAN id.
+// The resulting format is: rhcos_<ipv4>_<ipv6>[_vlan<ID>]
+// Empty IPv4/IPv6 parts are omitted; VLAN suffix is added only when provided.
+func BuildNewStaterootNameFromIpsAndVlan(ipv4, ipv6, vlan string) string {
 	parts := []string{"rhcos"}
-
 	if ipv4 != "" {
 		parts = append(parts, SanitizeForOsname(ipv4))
 	}
 
 	if ipv6 != "" {
 		parts = append(parts, SanitizeForOsname(ipv6))
+	}
+
+	if vlan != "" {
+		parts = append(parts, "vlan"+SanitizeForOsname(vlan))
 	}
 
 	return strings.Join(parts, "_")
