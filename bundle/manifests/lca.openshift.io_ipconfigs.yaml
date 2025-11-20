@@ -364,6 +364,30 @@ spec:
             && c.status==''True'') || has(oldSelf.spec.autoRollbackOnFailure) && has(self.spec.autoRollbackOnFailure)
             && oldSelf.spec.autoRollbackOnFailure==self.spec.autoRollbackOnFailure
             || !has(self.spec.autoRollbackOnFailure) && !has(oldSelf.spec.autoRollbackOnFailure)'
+        - message: can not change spec.ipv4.machineNetwork unless spec.ipv4.address
+            also changes
+          rule: '!(has(oldSelf.spec.ipv4) && has(self.spec.ipv4)) || oldSelf.spec.ipv4.machineNetwork
+            == self.spec.ipv4.machineNetwork || oldSelf.spec.ipv4.address != self.spec.ipv4.address'
+        - message: can not change spec.ipv4.gateway unless spec.ipv4.address also
+            changes
+          rule: '!(has(oldSelf.spec.ipv4) && has(self.spec.ipv4)) || oldSelf.spec.ipv4.gateway
+            == self.spec.ipv4.gateway || oldSelf.spec.ipv4.address != self.spec.ipv4.address'
+        - message: can not change spec.ipv4.dnsServer unless spec.ipv4.address also
+            changes
+          rule: '!(has(oldSelf.spec.ipv4) && has(self.spec.ipv4)) || oldSelf.spec.ipv4.dnsServer
+            == self.spec.ipv4.dnsServer || oldSelf.spec.ipv4.address != self.spec.ipv4.address'
+        - message: can not change spec.ipv6.machineNetwork unless spec.ipv6.address
+            also changes
+          rule: '!(has(oldSelf.spec.ipv6) && has(self.spec.ipv6)) || oldSelf.spec.ipv6.machineNetwork
+            == self.spec.ipv6.machineNetwork || oldSelf.spec.ipv6.address != self.spec.ipv6.address'
+        - message: can not change spec.ipv6.gateway unless spec.ipv6.address also
+            changes
+          rule: '!(has(oldSelf.spec.ipv6) && has(self.spec.ipv6)) || oldSelf.spec.ipv6.gateway
+            == self.spec.ipv6.gateway || oldSelf.spec.ipv6.address != self.spec.ipv6.address'
+        - message: can not change spec.ipv6.dnsServer unless spec.ipv6.address also
+            changes
+          rule: '!(has(oldSelf.spec.ipv6) && has(self.spec.ipv6)) || oldSelf.spec.ipv6.dnsServer
+            == self.spec.ipv6.dnsServer || oldSelf.spec.ipv6.address != self.spec.ipv6.address'
     served: true
     storage: true
     subresources:

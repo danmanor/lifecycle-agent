@@ -216,10 +216,8 @@ func isTargetStaterootBooted(ipc *ipcv1.IPConfig, rpmOstreeClient rpmostreeclien
 	return booted
 }
 
-// buildIPConfigStaterootName mirrors the lca-cli ip-config prepare naming scheme: rhcos_<ipv4>_<ipv6>[_vlan<ID>]
-// where IPs are sanitized to alphanumeric and dashes, IPv6 brackets are stripped, and VLAN suffix is added if specified.
 func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
-	var ipv4, ipv6, vlan string
+	var ipv4, ipv6, vlan, dnsIPFamily string
 	if ipc.Spec.IPv4 != nil {
 		ipv4 = ipc.Spec.IPv4.Address
 	}
@@ -232,7 +230,16 @@ func buildIPConfigStaterootName(ipc *ipcv1.IPConfig) string {
 		vlan = strconv.Itoa(ipc.Spec.VLAN.ID)
 	}
 
-	return common.BuildNewStaterootNameFromIpsAndVlan(ipv4, ipv6, vlan)
+	if ipc.Spec.DNSResolutionFamily != "" {
+		dnsIPFamily = ipc.Spec.DNSResolutionFamily
+	}
+
+	return common.BuildNewStaterootNameForIPConfig(common.IPConfigStaterootParams{
+		IPv4Address: ipv4,
+		IPv6Address: ipv6,
+		VLANID:      vlan,
+		DNSIPFamily: dnsIPFamily,
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

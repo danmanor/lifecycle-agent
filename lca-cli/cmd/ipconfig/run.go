@@ -61,27 +61,43 @@ var (
 	dnsIPFamily        string
 )
 
+const (
+	ipv4AddressFlag        = "ipv4-address"
+	ipv4MachineNetworkFlag = "ipv4-machine-network"
+	ipv6AddressFlag        = "ipv6-address"
+	ipv6MachineNetworkFlag = "ipv6-machine-network"
+	ipv4GatewayFlag        = "ipv4-gateway"
+	ipv6GatewayFlag        = "ipv6-gateway"
+	ipv4DNSFlag            = "ipv4-dns"
+	ipv6DNSFlag            = "ipv6-dns"
+	vlanIDFlag             = "vlan-id"
+	recertImageFlag        = "recert-image"
+	pullSecretRefNameFlag  = "pull-secret-ref-name"
+	dnsIPFamilyFlag        = "dns-ip-family"
+	runCmd                 = "run"
+)
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(ipConfigScheme))
 	utilruntime.Must(machineconfigv1.AddToScheme(ipConfigScheme))
 	utilruntime.Must(ocp_config_v1.AddToScheme(ipConfigScheme))
 
-	ipConfigRunCmd.Flags().StringVar(&ipv4Address, "ipv4-address", "", "Target IPv4 address")
-	ipConfigRunCmd.Flags().StringVar(&ipv4MachineNetwork, "ipv4-machine-network", "", "Target IPv4 machine network CIDR")
-	ipConfigRunCmd.Flags().StringVar(&ipv6Address, "ipv6-address", "", "Target IPv6 address")
-	ipConfigRunCmd.Flags().StringVar(&ipv6MachineNetwork, "ipv6-machine-network", "", "Target IPv6 machine network CIDR")
-	ipConfigRunCmd.Flags().StringVar(&ipv4Gateway, "ipv4-gateway", "", "IPv4 default gateway")
-	ipConfigRunCmd.Flags().StringVar(&ipv6Gateway, "ipv6-gateway", "", "IPv6 default gateway")
-	ipConfigRunCmd.Flags().StringVar(&ipv4DNS, "ipv4-dns", "", "IPv4 DNS server")
-	ipConfigRunCmd.Flags().StringVar(&ipv6DNS, "ipv6-dns", "", "IPv6 DNS server")
-	ipConfigRunCmd.Flags().IntVar(&vlanID, "vlan-id", 0, "Optional VLAN ID to use on the br-ex uplink")
-	ipConfigRunCmd.Flags().StringVar(&recertImage, "recert-image", "", "The full image name for the recert container tool")
-	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, "pull-secret-ref-name", "", "The name of the pull secret to use for the recert container tool")
-	ipConfigRunCmd.Flags().StringVar(&dnsIPFamily, "dns-ip-family", "", "IP family for DNS resolution (ipv4|ipv6)")
+	ipConfigRunCmd.Flags().StringVar(&ipv4Address, ipv4AddressFlag, "", "Target IPv4 address")
+	ipConfigRunCmd.Flags().StringVar(&ipv4MachineNetwork, ipv4MachineNetworkFlag, "", "Target IPv4 machine network CIDR")
+	ipConfigRunCmd.Flags().StringVar(&ipv6Address, ipv6AddressFlag, "", "Target IPv6 address")
+	ipConfigRunCmd.Flags().StringVar(&ipv6MachineNetwork, ipv6MachineNetworkFlag, "", "Target IPv6 machine network CIDR")
+	ipConfigRunCmd.Flags().StringVar(&ipv4Gateway, ipv4GatewayFlag, "", "IPv4 default gateway")
+	ipConfigRunCmd.Flags().StringVar(&ipv6Gateway, ipv6GatewayFlag, "", "IPv6 default gateway")
+	ipConfigRunCmd.Flags().StringVar(&ipv4DNS, ipv4DNSFlag, "", "IPv4 DNS server")
+	ipConfigRunCmd.Flags().StringVar(&ipv6DNS, ipv6DNSFlag, "", "IPv6 DNS server")
+	ipConfigRunCmd.Flags().IntVar(&vlanID, vlanIDFlag, 0, "Optional VLAN ID to use on the br-ex uplink")
+	ipConfigRunCmd.Flags().StringVar(&recertImage, recertImageFlag, "", "The full image name for the recert container tool")
+	ipConfigRunCmd.Flags().StringVar(&pullSecretRefName, pullSecretRefNameFlag, "", "The name of the pull secret to use for the recert container tool")
+	ipConfigRunCmd.Flags().StringVar(&dnsIPFamily, dnsIPFamilyFlag, "", "IP family for DNS resolution (ipv4|ipv6)")
 }
 
 var ipConfigRunCmd = &cobra.Command{
-	Use:   "run",
+	Use:   runCmd,
 	Short: "Execute IP configuration change and reboot to the new configuration",
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runIPConfigChange(); err != nil {
@@ -90,6 +106,10 @@ var ipConfigRunCmd = &cobra.Command{
 	},
 }
 
+// runIPConfigChange coordinates the ip-config "run" flow:
+// - writes initial status, loads flags/config, validates inputs
+// - infers the primary IP family and builds handler dependencies
+// - applies network changes, finalizes status, and reboots
 func runIPConfigChange() error {
 	err := common.WriteIPConfigStatus(common.IPConfigRunStatusFile,
 		common.IPConfigRunStatus{
@@ -123,7 +143,9 @@ func runIPConfigChange() error {
 		pkgLog.Info("using command line flags")
 	}
 
-	if err := validateIPConfigArgs(ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork); err != nil {
+	logRunFlags()
+
+	if err := validateRunFlags(); err != nil {
 		return err
 	}
 
@@ -205,13 +227,25 @@ func runIPConfigChange() error {
 	return nil
 }
 
-func validateIPConfigArgs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) error {
-	ipv4Both := ipv4Addr != "" && ipv4Net != ""
-	ipv4None := ipv4Addr == "" && ipv4Net == ""
-	ipv6Both := ipv6Addr != "" && ipv6Net != ""
-	ipv6None := ipv6Addr == "" && ipv6Net == ""
+// validateIPFamilyConfigArgs validates IPv4/IPv6 arguments for consistency and correctness.
+// It enforces that each family is either fully specified or omitted, and that
+// addresses and gateways belong to their respective machine networks.
+func validateIPFamilyConfigArgs(
+	ipv4Addr,
+	ipv4Net,
+	ipv6Addr,
+	ipv6Net,
+	ipv4Gw,
+	ipv6Gw,
+	ipv4DNSStr,
+	ipv6DNSStr string,
+) error {
+	ipv4All := ipv4Addr != "" && ipv4Net != "" && ipv4Gw != "" && ipv4DNSStr != ""
+	ipv4None := ipv4Addr == "" && ipv4Net == "" && ipv4Gw == "" && ipv4DNSStr == ""
+	ipv6All := ipv6Addr != "" && ipv6Net != "" && ipv6Gw != "" && ipv6DNSStr != ""
+	ipv6None := ipv6Addr == "" && ipv6Net == "" && ipv6Gw == "" && ipv6DNSStr == ""
 
-	if (!ipv4Both && !ipv4None) || (!ipv6Both && !ipv6None) {
+	if (!ipv4All && !ipv4None) || (!ipv6All && !ipv6None) {
 		return fmt.Errorf("both address and machine-network must be provided together for each IP family")
 	}
 
@@ -219,43 +253,77 @@ func validateIPConfigArgs(ipv4Addr, ipv4Net, ipv6Addr, ipv6Net string) error {
 		return fmt.Errorf("at least one of IPv4 or IPv6 must be provided")
 	}
 
-	if ipv4Both {
-		ip := net.ParseIP(ipv4Addr)
-		if ip == nil || ip.To4() == nil {
-			return fmt.Errorf("invalid IPv4 address: %s", ipv4Addr)
-		}
-		_, ipNet, err := net.ParseCIDR(ipv4Net)
-		if err != nil {
-			return fmt.Errorf("invalid IPv4 machine network CIDR: %s", ipv4Net)
-		}
-		if ipNet.IP.To4() == nil {
-			return fmt.Errorf("ipv4-machine-network must be an IPv4 CIDR: %s", ipv4Net)
-		}
-		if !ipNet.Contains(ip) {
-			return fmt.Errorf("IPv4 address %s is not within machine network %s", ipv4Addr, ipv4Net)
+	if ipv4All {
+		if err := validateIPFamilyConfig(
+			common.IPv4FamilyName,
+			ipv4Addr,
+			ipv4Net,
+			ipv4Gw,
+			ipv4DNSStr,
+		); err != nil {
+			return fmt.Errorf("invalid IPv4 config: %w", err)
 		}
 	}
 
-	if ipv6Both {
-		ip := net.ParseIP(ipv6Addr)
-		if ip == nil || ip.To4() != nil {
-			return fmt.Errorf("invalid IPv6 address: %s", ipv6Addr)
-		}
-		_, ipNet, err := net.ParseCIDR(ipv6Net)
-		if err != nil {
-			return fmt.Errorf("invalid IPv6 machine network CIDR: %s", ipv6Net)
-		}
-		if ipNet.IP.To4() != nil {
-			return fmt.Errorf("ipv6-machine-network must be an IPv6 CIDR: %s", ipv6Net)
-		}
-		if !ipNet.Contains(ip) {
-			return fmt.Errorf("IPv6 address %s is not within machine network %s", ipv6Addr, ipv6Net)
+	if ipv6All {
+		if err := validateIPFamilyConfig(
+			common.IPv6FamilyName,
+			ipv6Addr,
+			ipv6Net,
+			ipv6Gw,
+			ipv6DNSStr,
+		); err != nil {
+			return fmt.Errorf("invalid IPv6 config: %w", err)
 		}
 	}
 
 	return nil
 }
 
+// logRunFlags logs the effective flags used by the ip-config run command.
+func logRunFlags() {
+	pkgLog.Infof("ip-config run effective flags:")
+
+	if ipv4Address != "" {
+		pkgLog.Infof("  ipv4-address=%s", ipv4Address)
+	}
+	if ipv4MachineNetwork != "" {
+		pkgLog.Infof("  ipv4-machine-network=%s", ipv4MachineNetwork)
+	}
+	if ipv4Gateway != "" {
+		pkgLog.Infof("  ipv4-gateway=%s", ipv4Gateway)
+	}
+	if ipv4DNS != "" {
+		pkgLog.Infof("  ipv4-dns=%s", ipv4DNS)
+	}
+	if ipv6Address != "" {
+		pkgLog.Infof("  ipv6-address=%s", ipv6Address)
+	}
+	if ipv6MachineNetwork != "" {
+		pkgLog.Infof("  ipv6-machine-network=%s", ipv6MachineNetwork)
+	}
+	if ipv6Gateway != "" {
+		pkgLog.Infof("  ipv6-gateway=%s", ipv6Gateway)
+	}
+	if ipv6DNS != "" {
+		pkgLog.Infof("  ipv6-dns=%s", ipv6DNS)
+	}
+	if vlanID != 0 {
+		pkgLog.Infof("  vlan-id=%d", vlanID)
+	}
+	if pullSecretRefName != "" {
+		pkgLog.Infof("  pull-secret-ref-name=%s", pullSecretRefName)
+	}
+	if recertImage != "" {
+		pkgLog.Infof("  recert-image=%s", recertImage)
+	}
+	if dnsIPFamily != "" {
+		pkgLog.Infof("  dns-ip-family=%s", dnsIPFamily)
+	}
+}
+
+// inferPrimaryStack determines the primary IP family by reading the node's
+// current primary IP and returns "IPv4" or "IPv6".
 func inferPrimaryStack() (*string, error) {
 	data, err := os.ReadFile(utils.PrimaryIPPath)
 	if err != nil {
@@ -313,4 +381,105 @@ func buildIPConfigs(
 	}
 
 	return ipConfigs
+}
+
+// validateRunFlags validates all run cmd flags including IP configs, VLAN and DNS family.
+func validateRunFlags() error {
+	if err := validateIPFamilyConfigArgs(
+		ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork,
+		ipv4Gateway, ipv6Gateway, ipv4DNS, ipv6DNS,
+	); err != nil {
+		return fmt.Errorf("invalid IP config arguments: %w", err)
+	}
+
+	if vlanID < 0 {
+		return fmt.Errorf("vlan-id must be >= 0")
+	}
+
+	if dnsIPFamily != "" {
+		switch dnsIPFamily {
+		case common.IPv4FamilyName:
+		case common.IPv6FamilyName:
+		default:
+			return fmt.Errorf("dns-ip-family must be one of: %s|%s", common.IPv4FamilyName, common.IPv6FamilyName)
+		}
+	}
+
+	return nil
+}
+
+// validateIPFamilyConfig performs family-specific validation for addr, CIDR, gateway and DNS.
+func validateIPFamilyConfig(
+	family string,
+	addr string,
+	networkCIDR string,
+	gateway string,
+	dnsServer string,
+) error {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf("invalid %s address: %s", strings.ToUpper(family), addr)
+	}
+	isIPv4 := family == common.IPv4FamilyName
+	if isIPv4 && ip.To4() == nil {
+		return fmt.Errorf("invalid %s address: %s", strings.ToUpper(family), addr)
+	}
+	if !isIPv4 && ip.To4() != nil {
+		return fmt.Errorf("invalid %s address: %s", strings.ToUpper(family), addr)
+	}
+
+	_, ipNet, err := net.ParseCIDR(networkCIDR)
+	if err != nil {
+		return fmt.Errorf("invalid %s machine network CIDR: %s", strings.ToLower(family), networkCIDR)
+	}
+	if isIPv4 && ipNet.IP.To4() == nil {
+		return fmt.Errorf("%s-machine-network must be an %s CIDR: %s", family, strings.ToUpper(family), networkCIDR)
+	}
+	if !isIPv4 && ipNet.IP.To4() != nil {
+		return fmt.Errorf("%s-machine-network must be an %s CIDR: %s", family, strings.ToUpper(family), networkCIDR)
+	}
+	if !ipNet.Contains(ip) {
+		return fmt.Errorf("%s address %s is not within machine network %s", strings.ToUpper(family), addr, networkCIDR)
+	}
+
+	if gateway != "" {
+		gw := net.ParseIP(gateway)
+		if gw == nil {
+			return fmt.Errorf("invalid %s gateway: %s", strings.ToUpper(family), gateway)
+		}
+		if isIPv4 && gw.To4() == nil {
+			return fmt.Errorf("invalid %s gateway: %s", strings.ToUpper(family), gateway)
+		}
+		if !isIPv4 && gw.To4() != nil {
+			return fmt.Errorf("invalid %s gateway: %s", strings.ToUpper(family), gateway)
+		}
+		if !ipNet.Contains(gw) {
+			return fmt.Errorf("%s gateway %s is not within machine network %s", strings.ToUpper(family), gateway, networkCIDR)
+		}
+	}
+
+	if dnsServer != "" {
+		dns := net.ParseIP(dnsServer)
+		if dns == nil {
+			return fmt.Errorf("invalid %s DNS server: %s", strings.ToUpper(family), dnsServer)
+		}
+		if isIPv4 && dns.To4() == nil {
+			return fmt.Errorf("invalid %s DNS server: %s", strings.ToUpper(family), dnsServer)
+		}
+		if !isIPv4 && dns.To4() != nil {
+			return fmt.Errorf("invalid %s DNS server: %s", strings.ToUpper(family), dnsServer)
+		}
+	}
+
+	return nil
+}
+
+// validateIPv4Config validates IPv4 address, CIDR, gateway and DNS inputs.
+func validateIPv4Config(ipv4Addr, ipv4Net, ipv4Gw, ipv4DNSStr string) error {
+	return validateIPFamilyConfig(common.IPv4FamilyName, ipv4Addr, ipv4Net, ipv4Gw, ipv4DNSStr)
+}
+
+// validateIPv6Config validates IPv6 address, CIDR, gateway and DNS inputs.
+func validateIPv6Config(ipv6Addr, ipv6Net, ipv6Gw, ipv6DNSStr string) error {
+	return validateIPFamilyConfig(common.IPv6FamilyName, ipv6Addr, ipv6Net, ipv6Gw, ipv6DNSStr)
 }

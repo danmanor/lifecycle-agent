@@ -43,7 +43,7 @@ type NetworkIPConfig struct {
 	DNSServer      string
 }
 
-// IPConfig handles the IP change process
+// IPConfigHandler handles the IP change process.
 type IPConfigHandler struct {
 	log               *logrus.Logger
 	ops               ops.Ops
@@ -56,7 +56,7 @@ type IPConfigHandler struct {
 	DNSIPFamily       string
 }
 
-// NewIPConfig creates a new IPConfig instance
+// NewIPConfig creates a new IPConfigHandler instance.
 func NewIPConfig(
 	log *logrus.Logger,
 	ops ops.Ops,
@@ -81,6 +81,8 @@ func NewIPConfig(
 	}
 }
 
+// ProxyConfig represents proxy configuration used during recert, including
+// both spec values and effective status.
 type ProxyConfig struct {
 	HTTPProxy        string
 	HTTPSProxy       string
@@ -90,27 +92,15 @@ type ProxyConfig struct {
 	StatusNoProxy    string
 }
 
+// Run executes the full IP configuration change workflow, including
+// generating machine configuration, adjusting DNS overrides, stopping
+// cluster services, running recert, and re-enabling services.
 func (i *IPConfigHandler) Run() error {
-	i.log.Infof("Starting IP config process")
-	for _, ipConfig := range i.IPConfigs {
-		if ipConfig == nil {
-			continue
-		}
-		if ipConfig.IP != "" {
-			i.log.Infof("Changing IP to %s", ipConfig.IP)
-		}
-		if ipConfig.MachineNetwork != "" {
-			i.log.Infof("Changing machine network to %s", ipConfig.MachineNetwork)
-		}
-		if ipConfig.Gateway != "" {
-			i.log.Infof("Changing gateway to %s", ipConfig.Gateway)
-		}
-		if ipConfig.DNSServer != "" {
-			i.log.Infof("Changing DNS server to %s", ipConfig.DNSServer)
-		}
-	}
+	i.log.Info("IP config run started")
 
 	ctx := context.Background()
+
+	// Requires running cluster - start
 
 	i.log.Info("Preparing recert cluster data")
 	prepareRecertClusterData, err := i.prepareRecertClusterData(ctx)
@@ -127,6 +117,8 @@ func (i *IPConfigHandler) Run() error {
 	if err := i.configureDNSMasq(ctx); err != nil {
 		return fmt.Errorf("failed to configure dnsmasq override: %w", err)
 	}
+
+	// Requires running cluster - end
 
 	i.log.Info("Stopping cluster services")
 	if err := i.ops.StopClusterServices(); err != nil {
@@ -158,11 +150,13 @@ func (i *IPConfigHandler) Run() error {
 		return fmt.Errorf("failed to enable cluster services: %w", err)
 	}
 
-	i.log.Info("IP config process completed successfully")
+	i.log.Info("IP config run completed successfully")
 
 	return nil
 }
 
+// prepareRecertClusterData collects cluster data and artifacts required by the
+// recert tool (install-config, crypto, ingress CN, node IPs, proxy, auth).
 func (i *IPConfigHandler) prepareRecertClusterData(
 	ctx context.Context,
 ) (*RecertClusterData, error) {
@@ -220,7 +214,7 @@ func (i *IPConfigHandler) prepareRecertClusterData(
 	}, nil
 }
 
-// prepareProxyConfig reads the cluster Proxy CR, and if proxy is configured,
+// prepareProxyConfigForRecert reads the cluster Proxy CR, and if proxy is configured,
 // calculates the effective NoProxy by combining:
 // - localhost defaults
 // - new machine networks provided to ip-config
@@ -280,6 +274,8 @@ func (i *IPConfigHandler) prepareProxyConfigForRecert(ctx context.Context) (*Pro
 	}, nil
 }
 
+// runRecert writes a recert configuration and executes the full recert flow
+// to regenerate certificates and manifests for the new IP configuration.
 func (i *IPConfigHandler) runRecert(clusterData *RecertClusterData) error {
 	i.log.Info("Creating recert configuration file")
 
@@ -355,6 +351,8 @@ func ipFamilyOfString(ip string) string {
 	return common.IPv4FamilyName
 }
 
+// detectBrExNetworkInterface discovers the physical interface connected to
+// the external OVS bridge (br-ex), excluding patch ports.
 func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
 	i.log.Infof("Detecting %s network interface", BridgeExternalName)
 
@@ -378,6 +376,8 @@ func (i *IPConfigHandler) detectBrExNetworkInterface() (string, error) {
 	return "", fmt.Errorf("no connected network interface found")
 }
 
+// ensureNodeIPRerunService installs and enables a one-shot systemd service
+// to re-run nodeip detection after reboot, using a hint derived from the new network.
 func (i *IPConfigHandler) ensureNodeIPRerunService(newMachineNetwork string) error {
 	i.log.Infof("Installing one-shot nodeip rerun service at %s", utils.NodeipRerunUnitPath)
 
@@ -410,6 +410,8 @@ func (i *IPConfigHandler) ensureNodeIPRerunService(newMachineNetwork string) err
 	return nil
 }
 
+// configureDNSMasq writes a dnsmasq override to prefer the selected IP
+// (optionally constrained to a specific IP family) and updates MCO filter.
 func (i *IPConfigHandler) configureDNSMasq(ctx context.Context) error {
 	overrideIP := ""
 	for _, cfg := range i.IPConfigs {
@@ -451,6 +453,8 @@ func (i *IPConfigHandler) configureDNSMasq(ctx context.Context) error {
 	return nil
 }
 
+// cleanupNMStateAppliedFiles removes residual nmstate files that may interfere
+// with subsequent network reconfiguration.
 func (i *IPConfigHandler) cleanupNMStateAppliedFiles() error {
 	i.log.Info("Cleaning up nmstate residual state files")
 
@@ -472,6 +476,8 @@ func (i *IPConfigHandler) cleanupNMStateAppliedFiles() error {
 	return nil
 }
 
+// removeStaleFilesForRegeneration deletes known files so that components
+// regenerate their state safely after IP changes.
 func (i *IPConfigHandler) removeStaleFilesForRegeneration() error {
 	i.log.Infof("Removing stale files for regeneration")
 	files := []string{
@@ -550,6 +556,8 @@ func (i *IPConfigHandler) createMachineConfig(interfaceName string) (*machinecon
 	return mc, nil
 }
 
+// applyNetworkConfigurationMachineConfig creates or updates the MachineConfig
+// that applies the nmstate configuration for the detected interface.
 func (i *IPConfigHandler) applyNetworkConfigurationMachineConfig(ctx context.Context, interfaceName string) error {
 	i.log.Info("Applying machine config for IP changes")
 

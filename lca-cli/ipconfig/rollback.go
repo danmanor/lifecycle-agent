@@ -17,10 +17,14 @@ type RollbackHandler struct {
 	rpm    rpmOstree.IClient
 }
 
+// NewRollbackHandler constructs a RollbackHandler to revert an IP configuration
+// by switching the default OSTree deployment back to a specified stateroot.
 func NewRollbackHandler(log *logrus.Logger, ops ops.Ops, ostree intOstree.IClient, rpm rpmOstree.IClient) *RollbackHandler {
 	return &RollbackHandler{log: log, ops: ops, ostree: ostree, rpm: rpm}
 }
 
+// Run performs the rollback by setting the default deployment to the one
+// associated with the provided stateroot, if the OSTree feature is available.
 func (h *RollbackHandler) Run(stateroot string) error {
 	h.log.Infof("IP config rollback started with stateroot: %s", stateroot)
 

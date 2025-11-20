@@ -12,7 +12,7 @@ type IgnitionNMStateTemplateData struct {
 	EncodedContent string
 }
 
-//go:embed templates/ignition_nmstate.json.tmpl
+//go:embed templates/ignition-nmstate.json.tmpl
 var ignitionNMStateTemplate string
 
 // GenerateIgnitionNMState renders the ignition JSON for nmstate with the provided data
@@ -39,7 +39,7 @@ type IgnitionDNSMasqFilterTemplateData struct {
 	EncodedContent string
 }
 
-//go:embed templates/ignition_dnsmasq_filter.json.tmpl
+//go:embed templates/ignition-dnsmasq-filter.json.tmpl
 var ignitionDNSMasqFilterTemplate string
 
 // GenerateIgnitionDNSMasqFilter renders the ignition JSON for dnsmasq filter file with the provided data

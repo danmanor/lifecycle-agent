@@ -25,8 +25,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"strconv"
-
 	"github.com/go-logr/logr"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
 	"github.com/sirupsen/logrus"
@@ -49,29 +47,32 @@ import (
 var (
 	ipPrepareScheme = runtime.NewScheme()
 
-	newIPv4            string
-	newIPv6            string
-	newVLANID          int
+	newStaterootName   string
 	installInitMonitor bool
+)
+
+const (
+	newStaterootNameFlag   = "new-stateroot-name"
+	installInitMonitorFlag = "install-init-monitor"
+	prepareCmd             = "prepare"
 )
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(ipPrepareScheme))
 	utilruntime.Must(mcfgv1.AddToScheme(ipPrepareScheme))
 
-	ipConfigPrepareCmd.Flags().StringVar(&newIPv4, "ipv4-address", "", "New IPv4 address")
-	ipConfigPrepareCmd.Flags().StringVar(&newIPv6, "ipv6-address", "", "New IPv6 address")
-	ipConfigPrepareCmd.Flags().IntVar(&newVLANID, "vlan-id", 0, "VLAN ID to suffix the stateroot name with (optional)")
+	ipConfigPrepareCmd.Flags().StringVar(&newStaterootName, newStaterootNameFlag, "", "New stateroot name")
+	ipConfigPrepareCmd.MarkFlagRequired(newStaterootNameFlag)
 	ipConfigPrepareCmd.Flags().BoolVar(
 		&installInitMonitor,
-		"install-init-monitor",
+		installInitMonitorFlag,
 		false,
 		"Install init monitor service in the new stateroot",
 	)
 }
 
 var ipConfigPrepareCmd = &cobra.Command{
-	Use:   "prepare",
+	Use:   prepareCmd,
 	Short: "Prepare a new stateroot for IP configuration change and reboot to it",
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runIPConfigPrepare(); err != nil {
@@ -80,11 +81,12 @@ var ipConfigPrepareCmd = &cobra.Command{
 	},
 }
 
+// runIPConfigPrepare orchestrates the ip-config "prepare" flow:
+// - sets up executors and logs flags
+// - gathers OSTree state for old/new stateroots
+// - writes progress status, runs preparation, optionally installs an init monitor
+// - finalizes status and reboots into the new stateroot
 func runIPConfigPrepare() error {
-	if newIPv4 == "" && newIPv6 == "" {
-		return fmt.Errorf("at least one of --ipv4-address or --ipv6-address must be provided")
-	}
-
 	var hostCommandsExecutor ops.Execute
 	if _, err := os.Stat(common.Host); err == nil {
 		hostCommandsExecutor = ops.NewChrootExecutor(pkgLog, true, common.Host)
@@ -92,6 +94,8 @@ func runIPConfigPrepare() error {
 		hostCommandsExecutor = ops.NewRegularExecutor(pkgLog, true)
 	}
 	opsInterface := ops.NewOps(pkgLog, hostCommandsExecutor)
+
+	logPrepareFlags()
 
 	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.PathOutsideChroot(common.KubeconfigFile))
 	if err != nil {
@@ -112,7 +116,7 @@ func runIPConfigPrepare() error {
 		opsInterface,
 	)
 
-	ostreeData, err := getOstreeData(newIPv4, newIPv6, newVLANID, rpmClient, ostreeClient, pkgLog)
+	ostreeData, err := getOstreeData(newStaterootName, rpmClient, ostreeClient, pkgLog)
 	if err != nil {
 		return fmt.Errorf("failed to get ostree data: %w", err)
 	}
@@ -129,7 +133,7 @@ func runIPConfigPrepare() error {
 	}
 
 	ctx := context.Background()
-	if err := preparer.Run(ctx, newIPv4, newIPv6); err != nil {
+	if err := preparer.Run(ctx); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigPrepareStatusFile,
 			common.IPConfigPhaseFailed,
@@ -177,6 +181,13 @@ func runIPConfigPrepare() error {
 	}
 
 	return nil
+}
+
+// logPrepareFlags prints the flags used by the ip-config prepare command.
+func logPrepareFlags() {
+	pkgLog.Infof("ip-config prepare flags:")
+	pkgLog.Infof("  --%s=%q", newStaterootNameFlag, newStaterootName)
+	pkgLog.Infof("  --%s=%t", installInitMonitorFlag, installInitMonitor)
 }
 
 // installMonitorInitializationServiceInNewStateroot installs and enables the IPC init monitor service
@@ -258,9 +269,10 @@ func cleanupMonitorInitializationServiceInOldStateroot(
 	return nil
 }
 
+// getOstreeData returns information about the current (old) and target (new)
+// stateroots, including names, paths, deployment names, and deployment dirs.
 func getOstreeData(
-	newIPv4, newIPv6 string,
-	newVLANID int,
+	newStaterootName string,
 	rpmOstree rpmOstree.IClient,
 	ostree intOstree.IClient,
 	logger *logrus.Logger,
@@ -274,7 +286,7 @@ func getOstreeData(
 	}
 	ostreeData.OldStateroot = currentStaterootData
 
-	newStaterootData, err := getNewStaterootData(newIPv4, newIPv6, newVLANID, ostree, logger)
+	newStaterootData, err := getNewStaterootData(newStaterootName, ostree, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get new stateroot data: %w", err)
 	}
@@ -283,6 +295,7 @@ func getOstreeData(
 	return ostreeData, nil
 }
 
+// getCurrentStaterootData queries the system for the current stateroot details.
 func getCurrentStaterootData(rpmOstree rpmOstree.IClient, ostree intOstree.IClient) (*ipconfig.StaterootData, error) {
 	staterootData := &ipconfig.StaterootData{}
 
@@ -309,23 +322,16 @@ func getCurrentStaterootData(rpmOstree rpmOstree.IClient, ostree intOstree.IClie
 	return staterootData, nil
 }
 
+// getNewStaterootData resolves the metadata for the target new stateroot.
 func getNewStaterootData(
-	newIPv4, newIPv6 string,
-	newVLANID int,
+	newStaterootName string,
 	ostree intOstree.IClient,
 	logger *logrus.Logger,
 ) (*ipconfig.StaterootData, error) {
-	staterootData := &ipconfig.StaterootData{}
-
-	var vlan string
-	if newVLANID > 0 {
-		vlan = strconv.Itoa(newVLANID)
+	staterootData := &ipconfig.StaterootData{
+		Name: newStaterootName,
+		Path: common.GetStaterootPath(newStaterootName),
 	}
-
-	newStaterootName := common.BuildNewStaterootNameFromIpsAndVlan(newIPv4, newIPv6, vlan)
-	staterootData.Name = newStaterootName
-
-	staterootData.Path = common.GetStaterootPath(newStaterootName)
 
 	newDeploymentName, err := ostree.GetDeployment(newStaterootName)
 	if err != nil {

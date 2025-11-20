@@ -218,22 +218,32 @@ func SanitizeForOsname(s string) string {
 	return re.ReplaceAllString(s, "_")
 }
 
-// BuildNewStaterootNameFromIpsAndVlan builds a stateroot name from IPv4/IPv6 and optional VLAN id.
-// The resulting format is: rhcos_<ipv4>_<ipv6>[_vlan<ID>]
-// Empty IPv4/IPv6 parts are omitted; VLAN suffix is added only when provided.
-func BuildNewStaterootNameFromIpsAndVlan(ipv4, ipv6, vlan string) string {
+// IPConfigStaterootParams represents the parameters used to build a new stateroot name for IP configuration
+// Each of the spec values the user can change such that unique stateroot name is generated are represented here.
+type IPConfigStaterootParams struct {
+	IPv4Address string
+	IPv6Address string
+	VLANID      string
+	DNSIPFamily string
+}
+
+func BuildNewStaterootNameForIPConfig(params IPConfigStaterootParams) string {
 	parts := []string{"rhcos"}
-	if ipv4 != "" {
-		parts = append(parts, SanitizeForOsname(ipv4))
+	if params.IPv4Address != "" {
+		parts = append(parts, SanitizeForOsname(params.IPv4Address))
 	}
 
-	if ipv6 != "" {
-		parts = append(parts, SanitizeForOsname(ipv6))
+	if params.IPv6Address != "" {
+		parts = append(parts, SanitizeForOsname(params.IPv6Address))
 	}
 
-	if vlan != "" {
-		parts = append(parts, "vlan"+SanitizeForOsname(vlan))
+	if params.VLANID != "" {
+		parts = append(parts, "vlan_"+SanitizeForOsname(params.VLANID))
 	}
 
-	return strings.Join(parts, "_")
+	if params.DNSIPFamily != "" {
+		parts = append(parts, "dns_"+SanitizeForOsname(params.DNSIPFamily))
+	}
+
+	return strings.Join(parts, "-")
 }

@@ -149,6 +149,11 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 		return doNotRequeue(), nil
 	}
 
+	controllerutils.SetIPIdleStatusFalse(ipc, controllerutils.ConditionReasons.InProgress, "In progress")
+	if err := h.Client.Status().Update(ctx, ipc); err != nil {
+		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
+	}
+
 	controllerutils.SetIPConfigStatusInProgress(ipc, "Configuration preparation is in progress")
 	if err := h.Client.Status().Update(ctx, ipc); err != nil {
 		return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", err))
@@ -160,35 +165,6 @@ func (h *IPConfigConfigStageHandler) handlePrepareUnknown(
 	}
 
 	return result, nil
-}
-
-// familySpecMatchesStatus checks that the requested IP family spec does not introduce changes
-// compared to current host and cluster status. It returns true when no change is needed.
-func familySpecMatchesStatus(
-	spec *ipcv1.IPFamilyConfig,
-	host *ipcv1.HostIPStatus,
-	cluster *ipcv1.ClusterIPStatus,
-) bool {
-	if spec == nil {
-		return true
-	}
-	if host == nil || cluster == nil || cluster.Address == "" {
-		return false
-	}
-	if spec.Gateway != "" && spec.Gateway != host.Gateway {
-		return false
-	}
-	if spec.DNSServer != "" && spec.DNSServer != host.DNSServer {
-		return false
-	}
-	if spec.Address != "" && !ipEqual(strings.Split(spec.Address, "/")[0], cluster.Address) {
-		return false
-	}
-	if spec.MachineNetwork != "" && !cidrEqual(spec.MachineNetwork, cluster.MachineNetwork) {
-		return false
-	}
-
-	return true
 }
 
 // setDNSMasqFilterInMachineConfig updates the dnsmasq MachineConfig to filter DNS answers
@@ -336,7 +312,6 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	ipv4Addr, ipv6Addr := getIPAddresses(ipc)
 	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
@@ -358,11 +333,7 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		monitorEnabled = false
 	}
 
-	var vlanID int
-	if ipc.Spec.VLAN != nil {
-		vlanID = ipc.Spec.VLAN.ID
-	}
-	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipv4Addr, ipv6Addr, vlanID, monitorEnabled); err != nil {
+	if err := runLcaCliIPConfigPrepare(c.ChrootOps, logger, ipc, monitorEnabled); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to run ip-config prepare: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -760,24 +731,10 @@ func (c *IPConfigConfigPhasesHandler) RunLcaCliIPConfigRun(
 	return nil
 }
 
-func getIPAddresses(ipc *ipcv1.IPConfig) (string, string) {
-	ipv4Addr := ""
-	if ipc.Spec.IPv4 != nil && ipc.Spec.IPv4.Address != "" {
-		ipv4Addr = strings.Split(ipc.Spec.IPv4.Address, "/")[0]
-	}
-	ipv6Addr := ""
-	if ipc.Spec.IPv6 != nil && ipc.Spec.IPv6.Address != "" {
-		ipv6Addr = strings.Split(ipc.Spec.IPv6.Address, "/")[0]
-	}
-	return ipv4Addr, ipv6Addr
-}
-
 func runLcaCliIPConfigPrepare(
 	chrootOps ops.Ops,
 	logger logr.Logger,
-	ipv4Addr string,
-	ipv6Addr string,
-	vlanID int,
+	ipc *ipcv1.IPConfig,
 	monitorEnabled bool,
 ) error {
 	logger.Info("Scheduling lca-cli ip-config prepare via systemd-run")
@@ -793,19 +750,15 @@ func runLcaCliIPConfigPrepare(
 		args = append(args, "--install-init-monitor")
 	}
 
-	if ipv4Addr != "" {
-		args = append(args, "--ipv4-address", ipv4Addr)
-	}
-	if ipv6Addr != "" {
-		args = append(args, "--ipv6-address", ipv6Addr)
-	}
-	if vlanID > 0 {
-		args = append(args, "--vlan-id", fmt.Sprintf("%d", vlanID))
-	}
+	newStaterootName := buildIPConfigStaterootName(ipc)
+	args = append(args, "--new-stateroot-name", newStaterootName)
 
 	if _, err := chrootOps.RunSystemdAction(args...); err != nil {
 		return fmt.Errorf("failed to schedule lca-cli ip-config prepare: %w", err)
 	}
+
+	// We should never get here
+
 	return nil
 }
 

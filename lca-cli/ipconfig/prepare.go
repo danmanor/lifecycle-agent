@@ -20,11 +20,14 @@ import (
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
 )
 
+// OstreeData groups metadata about the old and new stateroots involved in the
+// IP configuration prepare flow.
 type OstreeData struct {
 	OldStateroot *StaterootData
 	NewStateroot *StaterootData
 }
 
+// StaterootData describes a stateroot's identity and deployment metadata.
 type StaterootData struct {
 	Name           string
 	Path           string
@@ -32,6 +35,8 @@ type StaterootData struct {
 	DeploymentName string
 }
 
+// PrepareHandler coordinates preparing a new stateroot for IP configuration
+// changes by deploying, copying state, and setting default deployment.
 type PrepareHandler struct {
 	log        *logrus.Logger
 	ops        ops.Ops
@@ -42,6 +47,7 @@ type PrepareHandler struct {
 	k8s        runtimeclient.Client
 }
 
+// NewPrepareHandler creates a new PrepareHandler instance.
 func NewPrepareHandler(
 	log *logrus.Logger,
 	ops ops.Ops,
@@ -62,14 +68,10 @@ func NewPrepareHandler(
 	}
 }
 
-func (p *PrepareHandler) Run(ctx context.Context, newIPv4, newIPv6 string) (err error) {
-	p.log.Infof("IP config prepare started")
-	if newIPv4 != "" {
-		p.log.Infof("Changing IPv4 address to: %s", newIPv4)
-	}
-	if newIPv6 != "" {
-		p.log.Infof("Changing IPv6 address to: %s", newIPv6)
-	}
+// Run executes the prepare sequence: stop services, deploy/prepare the new
+// stateroot, and re-enable services in the appropriate roots.
+func (p *PrepareHandler) Run(ctx context.Context) (err error) {
+	p.log.Info("IP config prepare started")
 
 	p.log.Info("Fetching current kernel args")
 	kargs, err := p.fetchCurrentKernelArgs()
@@ -113,6 +115,8 @@ func (p *PrepareHandler) Run(ctx context.Context, newIPv4, newIPv6 string) (err 
 	return nil
 }
 
+// prepareNewStateroot deploys the new stateroot if needed, copies data, and
+// sets it as default (when supported).
 func (p *PrepareHandler) prepareNewStateroot(
 	ostreeData *OstreeData,
 	kernelArgs []string,
@@ -158,6 +162,7 @@ func (p *PrepareHandler) ensureSysrootWritable() error {
 	return nil
 }
 
+// getBootedCommit returns the checksum of the currently booted rpm-ostree deployment.
 func (p *PrepareHandler) getBootedCommit() (*string, error) {
 	status, err := p.rpm.QueryStatus()
 	if err != nil {
@@ -179,6 +184,8 @@ func (p *PrepareHandler) getBootedCommit() (*string, error) {
 	return &bootedCommit, nil
 }
 
+// deployNewStateroot initializes OSTree for the new stateroot and deploys the
+// booted commit with the provided kernel args, updating the ostreeData fields.
 func (p *PrepareHandler) deployNewStateroot(
 	ostreeData *OstreeData,
 	bootedCommit string,
@@ -208,6 +215,7 @@ func (p *PrepareHandler) deployNewStateroot(
 	return nil
 }
 
+// copyStateRootData copies important state from the old stateroot to the new one.
 func (p *PrepareHandler) copyStateRootData(ostreeData *OstreeData) error {
 	if err := p.copyVar(
 		ostreeData.OldStateroot.Path,
@@ -235,6 +243,7 @@ func (p *PrepareHandler) copyStateRootData(ostreeData *OstreeData) error {
 	return nil
 }
 
+// setDefaultDeploymentIfEnabled sets the given stateroot as default when supported.
 func (p *PrepareHandler) setDefaultDeploymentIfEnabled(newStateroot string) error {
 	if !p.ostree.IsOstreeAdminSetDefaultFeatureEnabled() {
 		return fmt.Errorf("ostree admin set default feature is not enabled")
@@ -301,6 +310,8 @@ func (p *PrepareHandler) copyDeploymentOrigin(oldSRPath, newSRPath, oldDeploymen
 	return nil
 }
 
+// fetchCurrentKernelArgs reads the current MCD machineconfig and builds rpm-ostree
+// --karg-append arguments reflecting its kernel arguments (and FIPS when set).
 func (p *PrepareHandler) fetchCurrentKernelArgs() ([]string, error) {
 	var (
 		data []byte
@@ -320,6 +331,8 @@ func (p *PrepareHandler) fetchCurrentKernelArgs() ([]string, error) {
 	return buildKernelArgsFromMachineConfig(mc)
 }
 
+// buildKernelArgsFromMachineConfig converts MachineConfig.Spec.KernelArguments
+// (and FIPS) into a list of rpm-ostree --karg-append switches.
 func buildKernelArgsFromMachineConfig(mc *mcfgv1.MachineConfig) ([]string, error) {
 	args := make([]string, len(mc.Spec.KernelArguments)*2)
 	for i, karg := range mc.Spec.KernelArguments {
