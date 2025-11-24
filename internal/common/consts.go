@@ -89,9 +89,6 @@ const (
 	IPCInitMonitorService                           = "lca-init-monitor.service"
 	// InitMonitorModeFile configures which mode the init-monitor should operate in ("ibu" or "ipconfig")
 	InitMonitorModeFile = LCAWorkspaceDir + "/initmonitor_mode"
-	// IPCAutoRollbackOnFailureRunAnnotation configures automatic rollback when the IPConfig run fails.
-	// Only acceptable value is AutoRollbackDisableValue. Any other value is treated as "Enabled".
-	IPCAutoRollbackOnFailureRunAnnotation = "auto-rollback-on-failure.lca.openshift.io/ip-config-run"
 	// AutoRollbackOnFailurePostRebootConfigAnnotation configure automatic rollback when the reconfiguration of the cluster fails upon the first reboot.
 	// Only acceptable value is AutoRollbackDisableValue. Any other value is treated as "Enabled".
 	AutoRollbackOnFailurePostRebootConfigAnnotation = "auto-rollback-on-failure.lca.openshift.io/post-reboot-config"
@@ -101,6 +98,9 @@ const (
 	// AutoRollbackOnFailureInitMonitorAnnotation configure automatic rollback LCA Init Monitor watchdog, which triggers auto-rollback if timeout occurs before upgrade completion
 	// Only acceptable value is AutoRollbackDisableValue. Any other value is treated as "Enabled".
 	AutoRollbackOnFailureInitMonitorAnnotation = "auto-rollback-on-failure.lca.openshift.io/init-monitor"
+	// AutoRollbackOnFailureIPConfigRunAnnotation configure automatic rollback when the IP config run fails.
+	// Only acceptable value is AutoRollbackDisableValue. Any other value is treated as "Enabled".
+	AutoRollbackOnFailureIPConfigRunAnnotation = "auto-rollback-on-failure.lca.openshift.io/ip-config-run"
 	// AutoRollbackDisableValue value that decides if rollback is disabled
 	AutoRollbackDisableValue = "Disabled"
 	// ContainerStorageUsageThresholdPercentAnnotation overrides default /var/lib/containers disk usage threshold for image cleanup

@@ -107,7 +107,7 @@ func (h *IPConfigConfigStageHandler) Handle(ctx context.Context, ipc *ipcv1.IPCo
 		}
 	}
 
-	status, message, err := common.ReadIPConfigStatus(
+	status, message, err := ReadIPConfigStatus(
 		common.PathOutsideChroot(common.IPConfigPrepareStatusFile),
 		h.ChrootOps,
 	)
@@ -210,7 +210,7 @@ func (h *IPConfigConfigStageHandler) handlePrepareSucceeded(
 		return doNotRequeue(), nil
 	}
 
-	runPhase, runMessage, err := common.ReadIPConfigStatus(
+	runPhase, runMessage, err := ReadIPConfigStatus(
 		common.PathOutsideChroot(common.IPConfigRunStatusFile),
 		h.ChrootOps,
 	)
@@ -312,7 +312,7 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		return requeueWithHealthCheckInterval(), nil
 	}
 
-	if err := controllerutils.CopyLcaCliToHost(logger); err != nil {
+	if err := c.copyLcaCliToHost(logger); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to copy lca-cli binary: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -320,7 +320,7 @@ func (c *IPConfigConfigPhasesHandler) PrePivot(
 		return requeueWithError(fmt.Errorf("failed to copy lca-cli binary: %w", err))
 	}
 
-	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc); err != nil {
+	if err := reboot.WriteIPCAutoRollbackConfigFile(logger, ipc, c.ChrootOps); err != nil {
 		controllerutils.SetIPConfigStatusFailed(ipc, fmt.Sprintf("failed to write ip-config auto-rollback config: %s", err.Error()))
 		if uerr := c.Client.Status().Update(ctx, ipc); uerr != nil {
 			return requeueWithError(fmt.Errorf("failed to update ipconfig status: %w", uerr))
@@ -616,7 +616,28 @@ func checkFamilyStatusMatchesSpec(
 }
 
 func ipEqual(a, b string) bool {
-	return net.ParseIP(a).Equal(net.ParseIP(b))
+	// Normalize potential CIDR-style inputs (e.g. "192.0.2.10/24") to plain IPs
+	normalize := func(s string) string {
+		if strings.Contains(s, "/") {
+			s = strings.SplitN(s, "/", 2)[0]
+		}
+		// IPv6 addresses sometimes appear wrapped in brackets (e.g. "[2001:db8::1]").
+		// Strip these so "[2001:db8::1]" and "2001:db8::1" compare equal.
+		return strings.Trim(s, "[]")
+	}
+
+	na := normalize(a)
+	nb := normalize(b)
+
+	ipA := net.ParseIP(na)
+	ipB := net.ParseIP(nb)
+
+	// If parsing fails, fall back to plain string comparison
+	if ipA == nil || ipB == nil {
+		return a == b
+	}
+
+	return ipA.Equal(ipB)
 }
 
 func cidrEqual(a, b string) bool {
@@ -693,6 +714,7 @@ func (c *IPConfigConfigPhasesHandler) writeIPConfigRunConfig(ipc *ipcv1.IPConfig
 	if err != nil {
 		return fmt.Errorf("failed to marshal ip-config run config: %w", err)
 	}
+
 	if err := c.ChrootOps.WriteFile(common.PathOutsideChroot(common.IPConfigRunFlagsFile), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write ip-config run config: %w", err)
 	}
@@ -778,6 +800,17 @@ func (h *IPConfigConfigStageHandler) validateDNSMasqMCExists(ctx context.Context
 	mc := &machineconfigv1.MachineConfig{}
 	if err := h.Client.Get(ctx, types.NamespacedName{Name: common.DnsmasqMachineConfigName}, mc); err != nil {
 		return fmt.Errorf("failed to get dnsmasq machine config: %w", err)
+	}
+
+	return nil
+}
+
+func (c *IPConfigConfigPhasesHandler) copyLcaCliToHost(logger logr.Logger) error {
+	src := controllerutils.LcaCliBinaryContainerPath
+	dst := common.PathOutsideChroot(controllerutils.LcaCliBinaryHostPath)
+	logger.Info("Copying lca-cli binary", "src", src, "dst", dst)
+	if err := c.ChrootOps.CopyFile(src, dst, 0o777); err != nil {
+		return fmt.Errorf("failed to copy lca-cli binary: %w", err)
 	}
 
 	return nil

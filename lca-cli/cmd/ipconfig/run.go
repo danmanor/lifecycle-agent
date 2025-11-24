@@ -17,6 +17,7 @@ limitations under the License.
 package ipconfigcmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -39,7 +40,7 @@ import (
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ipconfig"
 	"github.com/openshift-kni/lifecycle-agent/lca-cli/ops"
 	rpmOstree "github.com/openshift-kni/lifecycle-agent/lca-cli/ostreeclient"
-	"github.com/openshift-kni/lifecycle-agent/utils"
+	lcautils "github.com/openshift-kni/lifecycle-agent/utils"
 	ocp_config_v1 "github.com/openshift/api/config/v1"
 	machineconfigv1 "github.com/openshift/api/machineconfiguration/v1"
 )
@@ -145,32 +146,12 @@ func runIPConfigChange() error {
 
 	logRunFlags()
 
-	if err := validateRunFlags(); err != nil {
-		return err
-	}
-
-	effectivePrimary, err := inferPrimaryStack()
-	if err != nil {
-		return err
-	}
-
-	ipConfigs := buildIPConfigs(
-		ipv4Address, ipv4MachineNetwork, ipv4Gateway, ipv4DNS,
-		ipv6Address, ipv6MachineNetwork, ipv6Gateway, ipv6DNS,
-		lo.FromPtr(effectivePrimary),
-	)
-
-	if recertImage == "" {
-		recertImage = common.DefaultRecertImage
-	}
-
 	var hostCommandsExecutor ops.Execute
 	if _, err := os.Stat(common.Host); err == nil {
 		hostCommandsExecutor = ops.NewChrootExecutor(pkgLog, true, common.Host)
 	} else {
 		hostCommandsExecutor = ops.NewRegularExecutor(pkgLog, true)
 	}
-
 	opsInterface := ops.NewOps(pkgLog, hostCommandsExecutor)
 
 	k8sConfig, err := clientcmd.BuildConfigFromFlags("", common.PathOutsideChroot(common.KubeconfigFile))
@@ -181,6 +162,35 @@ func runIPConfigChange() error {
 	client, err := runtimeClient.New(k8sConfig, runtimeClient.Options{Scheme: ipConfigScheme})
 	if err != nil {
 		return fmt.Errorf("failed to create runtime client: %w", err)
+	}
+
+	ctx := context.Background()
+
+	if err := validateRunFlags(ctx, client); err != nil {
+		return err
+	}
+
+	if err := gatherMissingNetworkData(
+		ctx,
+		client,
+		opsInterface,
+	); err != nil {
+		return err
+	}
+
+	effectivePrimary, err := ipconfig.InferPrimaryStack()
+	if err != nil {
+		return err
+	}
+
+	ipConfigs := ipconfig.BuildIPConfigs(
+		ipv4Address, ipv4MachineNetwork, ipv4Gateway, ipv4DNS,
+		ipv6Address, ipv6MachineNetwork, ipv6Gateway, ipv6DNS,
+		lo.FromPtr(effectivePrimary),
+	)
+
+	if recertImage == "" {
+		recertImage = common.DefaultRecertImage
 	}
 
 	ipConfigHandler := ipconfig.NewIPConfig(
@@ -199,7 +209,7 @@ func runIPConfigChange() error {
 	ostreeClient := intOstree.NewClient(hostCommandsExecutor, false)
 	rbClient := reboot.NewIPCRebootClient(&logr.Logger{}, hostCommandsExecutor, rpmClient, ostreeClient, opsInterface)
 
-	if err := ipConfigHandler.Run(); err != nil {
+	if err := ipConfigHandler.Run(ctx); err != nil {
 		internalErr := common.FinalizeIPConfigStatus(
 			common.IPConfigRunStatusFile,
 			common.IPConfigPhaseFailed,
@@ -208,6 +218,10 @@ func runIPConfigChange() error {
 		if internalErr != nil {
 			return fmt.Errorf("failed to finalize IP config run status: %w", internalErr)
 		}
+
+		rbClient.AutoRollbackIfEnabled(
+			reboot.IPConfigRunComponent, fmt.Sprintf("ip-config run failed: %v", err),
+		)
 
 		return fmt.Errorf("failed to run IP config: %w", err)
 	}
@@ -227,23 +241,174 @@ func runIPConfigChange() error {
 	return nil
 }
 
+// completeMissingIPFamilyFromClusterAndHost fills in missing IP family configuration
+// (address, machine network, gateway, DNS) by inspecting the current SNO host and
+// cluster state. It is used when the user only specifies one IP family on a
+// dual-stack cluster so that recert and nmstate still see a complete configuration.
+func gatherMissingNetworkData(
+	ctx context.Context,
+	client runtimeClient.Client,
+	hostOps ops.Ops,
+) error {
+	ipv4Provided := ipv4Address != "" || ipv4MachineNetwork != "" || ipv4Gateway != "" || ipv4DNS != ""
+	ipv6Provided := ipv6Address != "" || ipv6MachineNetwork != "" || ipv6Gateway != "" || ipv6DNS != ""
+
+	if ipv4Provided && ipv6Provided {
+		return nil
+	}
+
+	// dual-stack clusters only
+
+	nmOutput, err := hostOps.RunInHostNamespace("nmstatectl", "show", "--json", "-q")
+	if err != nil {
+		return fmt.Errorf("failed to run nmstatectl show --json: %w", err)
+	}
+
+	nmState, err := lcautils.ParseNmstate(nmOutput)
+	if err != nil {
+		return fmt.Errorf("failed to parse nmstate output: %w", err)
+	}
+
+	dnsV4, dnsV6 := lcautils.ExtractDNS(nmState)
+	if dnsV4 == "" || dnsV6 == "" {
+		return fmt.Errorf("failed to extract DNS servers from nmstate output")
+	}
+
+	gw4, gw6 := lcautils.FindDefaultGateways(
+		nmState,
+		ipconfig.BridgeExternalName,
+		ipconfig.DefaultRouteV4,
+		ipconfig.DefaultRouteV6,
+	)
+	if gw4 == "" || gw6 == "" {
+		return fmt.Errorf("failed to extract default gateways from nmstate output")
+	}
+
+	ips, err := lcautils.GetNodeInternalIPs(ctx, client)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster info: %w", err)
+	}
+
+	var nodeIPv4, nodeIPv6 string
+	for _, ip := range ips {
+		if strings.Contains(ip, ":") {
+			if nodeIPv6 == "" {
+				nodeIPv6 = ip
+			}
+		} else {
+			if nodeIPv4 == "" {
+				nodeIPv4 = ip
+			}
+		}
+	}
+
+	clusterHasIPv4, clusterHasIPv6 := detectClusterIPFamilies(ips)
+	machineNetworks, err := lcautils.GetMachineNetworks(ctx, client)
+	if err != nil {
+		return fmt.Errorf("failed to get machine networks: %w", err)
+	}
+
+	// Auto-complete IPv4 if user omitted it but cluster is IPv4-capable.
+	if !ipv4Provided && clusterHasIPv4 {
+		cidr := lcautils.FindMatchingCIDR(nodeIPv4, machineNetworks)
+		if cidr == "" {
+			return fmt.Errorf("failed to find machine network CIDR for node IPv4 %s", nodeIPv4)
+		}
+
+		pkgLog.Infof("Auto-completing IPv4 configuration from cluster/host state: ip=%s, cidr=%s", nodeIPv4, cidr)
+		ipv4Address = nodeIPv4
+		ipv4MachineNetwork = cidr
+		ipv4Gateway = gw4
+		ipv4DNS = dnsV4
+	}
+
+	// Auto-complete IPv6 if user omitted it but cluster is IPv6-capable.
+	if !ipv6Provided && clusterHasIPv6 {
+		cidr := lcautils.FindMatchingCIDR(nodeIPv6, machineNetworks)
+		if cidr == "" {
+			return fmt.Errorf("failed to find machine network CIDR for node IPv6 %s", nodeIPv6)
+		}
+
+		pkgLog.Infof("Auto-completing IPv6 configuration from cluster/host state: ip=%s, cidr=%s", nodeIPv6, cidr)
+		ipv6Address = nodeIPv6
+		ipv6MachineNetwork = cidr
+		ipv6Gateway = gw6
+		ipv6DNS = dnsV6
+	}
+
+	return nil
+}
+
+// validateClusterAPIAndUserIPSpec ensures that:
+//  1. the cluster API is reachable, by attempting to read the node internal IPs
+//  2. the user-provided IP family configuration (IPv4/IPv6/both) is compatible
+//     with the cluster's configured IP families (single-stack or dual-stack).
+func validateClusterAPIAndUserIPSpec(
+	ctx context.Context,
+	client runtimeClient.Client,
+) error {
+	ips, err := lcautils.GetNodeInternalIPs(ctx, client)
+	if err != nil {
+		return fmt.Errorf("failed to contact cluster API: %w", err)
+	}
+
+	clusterHasIPv4, clusterHasIPv6 := detectClusterIPFamilies(ips)
+
+	ipv4Provided := ipv4Address != "" || ipv4MachineNetwork != "" || ipv4Gateway != "" || ipv4DNS != ""
+	ipv6Provided := ipv6Address != "" || ipv6MachineNetwork != "" || ipv6Gateway != "" || ipv6DNS != ""
+
+	switch {
+	case ipv4Provided && ipv6Provided:
+		// Both families requested: cluster must be dual-stack.
+		if !(clusterHasIPv4 && clusterHasIPv6) {
+			return fmt.Errorf("both IPv4 and IPv6 flags provided but cluster is not configured as dual-stack")
+		}
+	case ipv4Provided && !ipv6Provided:
+		// Only IPv4 requested: cluster must support IPv4 (single-stack IPv4 or dual-stack).
+		if !clusterHasIPv4 {
+			return fmt.Errorf("only IPv4 flags provided but cluster is not configured for IPv4")
+		}
+	case !ipv4Provided && ipv6Provided:
+		// Only IPv6 requested: cluster must support IPv6 (single-stack IPv6 or dual-stack).
+		if !clusterHasIPv6 {
+			return fmt.Errorf("only IPv6 flags provided but cluster is not configured for IPv6")
+		}
+	default:
+	}
+
+	return nil
+}
+
+// detectClusterIPFamilies inspects cluster info to determine whether the
+// cluster is configured with IPv4, IPv6, or both (dual-stack).
+func detectClusterIPFamilies(ips []string) (bool, bool) {
+	var nodeIPv4, nodeIPv6 string
+	for _, ip := range ips {
+		if strings.Contains(ip, ":") {
+			if nodeIPv6 == "" {
+				nodeIPv6 = ip
+			}
+		} else {
+			if nodeIPv4 == "" {
+				nodeIPv4 = ip
+			}
+		}
+	}
+
+	clusterHasIPv4 := nodeIPv4 != ""
+	clusterHasIPv6 := nodeIPv6 != ""
+
+	return clusterHasIPv4, clusterHasIPv6
+}
+
 // validateIPFamilyConfigArgs validates IPv4/IPv6 arguments for consistency and correctness.
 // It enforces that each family is either fully specified or omitted, and that
 // addresses and gateways belong to their respective machine networks.
-func validateIPFamilyConfigArgs(
-	ipv4Addr,
-	ipv4Net,
-	ipv6Addr,
-	ipv6Net,
-	ipv4Gw,
-	ipv6Gw,
-	ipv4DNSStr,
-	ipv6DNSStr string,
-) error {
-	ipv4All := ipv4Addr != "" && ipv4Net != "" && ipv4Gw != "" && ipv4DNSStr != ""
-	ipv4None := ipv4Addr == "" && ipv4Net == "" && ipv4Gw == "" && ipv4DNSStr == ""
-	ipv6All := ipv6Addr != "" && ipv6Net != "" && ipv6Gw != "" && ipv6DNSStr != ""
-	ipv6None := ipv6Addr == "" && ipv6Net == "" && ipv6Gw == "" && ipv6DNSStr == ""
+func validateIPFamilyConfigArgs() error {
+	ipv4All := ipv4Address != "" && ipv4MachineNetwork != "" && ipv4Gateway != "" && ipv4DNS != ""
+	ipv4None := ipv4Address == "" && ipv4MachineNetwork == "" && ipv4Gateway == "" && ipv4DNS == ""
+	ipv6All := ipv6Address != "" && ipv6MachineNetwork != "" && ipv6Gateway != "" && ipv6DNS != ""
+	ipv6None := ipv6Address == "" && ipv6MachineNetwork == "" && ipv6Gateway == "" && ipv6DNS == ""
 
 	if (!ipv4All && !ipv4None) || (!ipv6All && !ipv6None) {
 		return fmt.Errorf("both address and machine-network must be provided together for each IP family")
@@ -256,10 +421,10 @@ func validateIPFamilyConfigArgs(
 	if ipv4All {
 		if err := validateIPFamilyConfig(
 			common.IPv4FamilyName,
-			ipv4Addr,
-			ipv4Net,
-			ipv4Gw,
-			ipv4DNSStr,
+			ipv4Address,
+			ipv4MachineNetwork,
+			ipv4Gateway,
+			ipv4DNS,
 		); err != nil {
 			return fmt.Errorf("invalid IPv4 config: %w", err)
 		}
@@ -268,10 +433,10 @@ func validateIPFamilyConfigArgs(
 	if ipv6All {
 		if err := validateIPFamilyConfig(
 			common.IPv6FamilyName,
-			ipv6Addr,
-			ipv6Net,
-			ipv6Gw,
-			ipv6DNSStr,
+			ipv6Address,
+			ipv6MachineNetwork,
+			ipv6Gateway,
+			ipv6DNS,
 		); err != nil {
 			return fmt.Errorf("invalid IPv6 config: %w", err)
 		}
@@ -322,74 +487,14 @@ func logRunFlags() {
 	}
 }
 
-// inferPrimaryStack determines the primary IP family by reading the node's
-// current primary IP and returns "IPv4" or "IPv6".
-func inferPrimaryStack() (*string, error) {
-	data, err := os.ReadFile(utils.PrimaryIPPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read primary IP: %w", err)
-	}
-
-	primaryIP := strings.TrimSpace(string(data))
-	if primaryIP == "" {
-		return nil, fmt.Errorf("primary IP not found")
-	}
-
-	ip := net.ParseIP(primaryIP)
-	if ip == nil {
-		return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
-	}
-
-	if ip.To4() != nil {
-		return lo.ToPtr(common.IPv4FamilyName), nil
-	}
-
-	if ip.To16() != nil {
-		return lo.ToPtr(common.IPv6FamilyName), nil
-	}
-
-	return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
-}
-
-// buildIPConfigs creates the ordered slice of NetworkIPConfig with primary first.
-func buildIPConfigs(
-	ipv4Addr, ipv4Net, ipv4Gw, ipv4DNS string,
-	ipv6Addr, ipv6Net, ipv6Gw, ipv6DNS string,
-	primary string,
-) []*ipconfig.NetworkIPConfig {
-	var ipv4Config *ipconfig.NetworkIPConfig
-	if ipv4Addr != "" && ipv4Net != "" {
-		ipv4Config = &ipconfig.NetworkIPConfig{IP: ipv4Addr, MachineNetwork: ipv4Net, Gateway: ipv4Gw, DNSServer: ipv4DNS}
-	}
-
-	var ipv6Config *ipconfig.NetworkIPConfig
-	if ipv6Addr != "" && ipv6Net != "" {
-		ipv6Config = &ipconfig.NetworkIPConfig{IP: ipv6Addr, MachineNetwork: ipv6Net, Gateway: ipv6Gw, DNSServer: ipv6DNS}
-	}
-
-	ipConfigs := []*ipconfig.NetworkIPConfig{}
-	if primary == common.IPv4FamilyName && ipv4Config != nil {
-		ipConfigs = append(ipConfigs, ipv4Config)
-		if ipv6Config != nil {
-			ipConfigs = append(ipConfigs, ipv6Config)
-		}
-	} else if primary == common.IPv6FamilyName && ipv6Config != nil {
-		ipConfigs = append(ipConfigs, ipv6Config)
-		if ipv4Config != nil {
-			ipConfigs = append(ipConfigs, ipv4Config)
-		}
-	}
-
-	return ipConfigs
-}
-
 // validateRunFlags validates all run cmd flags including IP configs, VLAN and DNS family.
-func validateRunFlags() error {
-	if err := validateIPFamilyConfigArgs(
-		ipv4Address, ipv4MachineNetwork, ipv6Address, ipv6MachineNetwork,
-		ipv4Gateway, ipv6Gateway, ipv4DNS, ipv6DNS,
-	); err != nil {
+func validateRunFlags(ctx context.Context, client runtimeClient.Client) error {
+	if err := validateIPFamilyConfigArgs(); err != nil {
 		return fmt.Errorf("invalid IP config arguments: %w", err)
+	}
+
+	if err := validateClusterAPIAndUserIPSpec(ctx, client); err != nil {
+		return fmt.Errorf("failed to validate cluster API and user IP spec: %w", err)
 	}
 
 	if vlanID < 0 {
@@ -472,14 +577,4 @@ func validateIPFamilyConfig(
 	}
 
 	return nil
-}
-
-// validateIPv4Config validates IPv4 address, CIDR, gateway and DNS inputs.
-func validateIPv4Config(ipv4Addr, ipv4Net, ipv4Gw, ipv4DNSStr string) error {
-	return validateIPFamilyConfig(common.IPv4FamilyName, ipv4Addr, ipv4Net, ipv4Gw, ipv4DNSStr)
-}
-
-// validateIPv6Config validates IPv6 address, CIDR, gateway and DNS inputs.
-func validateIPv6Config(ipv6Addr, ipv6Net, ipv6Gw, ipv6DNSStr string) error {
-	return validateIPFamilyConfig(common.IPv6FamilyName, ipv6Addr, ipv6Net, ipv6Gw, ipv6DNSStr)
 }

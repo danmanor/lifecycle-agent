@@ -54,6 +54,20 @@ func (mr *MockOpsMockRecorder) Chroot(chrootPath any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Chroot", reflect.TypeOf((*MockOps)(nil).Chroot), chrootPath)
 }
 
+// CopyFile mocks base method.
+func (m *MockOps) CopyFile(src, dest string, perm os.FileMode) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CopyFile", src, dest, perm)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CopyFile indicates an expected call of CopyFile.
+func (mr *MockOpsMockRecorder) CopyFile(src, dest, perm any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CopyFile", reflect.TypeOf((*MockOps)(nil).CopyFile), src, dest, perm)
+}
+
 // CreateExtraPartition mocks base method.
 func (m *MockOps) CreateExtraPartition(installationDisk, extraPartitionLabel, extraPartitionStart string, extraPartitionNumber uint) error {
 	m.ctrl.T.Helper()

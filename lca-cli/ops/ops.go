@@ -23,6 +23,7 @@ import (
 
 	"github.com/openshift-kni/lifecycle-agent/utils"
 	"github.com/openshift/assisted-image-service/pkg/isoeditor"
+	cp "github.com/otiai10/copy"
 )
 
 const (
@@ -44,6 +45,7 @@ type Ops interface {
 	RunListOfCommands(cmds []*CMD) error
 	ReadFile(filename string) ([]byte, error)
 	WriteFile(filename string, data []byte, perm os.FileMode) error
+	CopyFile(src, dest string, perm os.FileMode) error
 	RemoveFile(path string) error
 	RemoveAllFiles(path string) error
 	ReadDir(path string) ([]os.DirEntry, error)
@@ -542,6 +544,10 @@ func (o *ops) ReadFile(filename string) ([]byte, error) {
 
 func (o *ops) WriteFile(filename string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(filename, data, perm)
+}
+
+func (o *ops) CopyFile(src, dest string, perm os.FileMode) error {
+	return cp.Copy(src, dest, cp.Options{AddPermission: perm})
 }
 
 func (o *ops) RemoveFile(path string) error {

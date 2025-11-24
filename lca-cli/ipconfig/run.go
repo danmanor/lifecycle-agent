@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"strings"
 	"time"
 
 	ocp_config_v1 "github.com/openshift/api/config/v1"
+	"github.com/samber/lo"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,10 +97,8 @@ type ProxyConfig struct {
 // Run executes the full IP configuration change workflow, including
 // generating machine configuration, adjusting DNS overrides, stopping
 // cluster services, running recert, and re-enabling services.
-func (i *IPConfigHandler) Run() error {
+func (i *IPConfigHandler) Run(ctx context.Context) error {
 	i.log.Info("IP config run started")
-
-	ctx := context.Background()
 
 	// Requires running cluster - start
 
@@ -349,6 +349,84 @@ func ipFamilyOfString(ip string) string {
 		return common.IPv6FamilyName
 	}
 	return common.IPv4FamilyName
+}
+
+// InferPrimaryStack determines the primary IP family by reading the node's current primary IP
+// and returns a pointer to "IPv4" or "IPv6".
+func InferPrimaryStack() (*string, error) {
+	data, err := os.ReadFile(utils.PrimaryIPPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read primary IP: %w", err)
+	}
+
+	primaryIP := strings.TrimSpace(string(data))
+	if primaryIP == "" {
+		return nil, fmt.Errorf("primary IP not found")
+	}
+
+	ip := net.ParseIP(primaryIP)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
+	}
+
+	if ip.To4() != nil {
+		return lo.ToPtr(common.IPv4FamilyName), nil
+	}
+
+	if ip.To16() != nil {
+		return lo.ToPtr(common.IPv6FamilyName), nil
+	}
+
+	return nil, fmt.Errorf("invalid primary IP: %s", primaryIP)
+}
+
+// BuildIPConfigs creates the ordered slice of NetworkIPConfig with primary first.
+func BuildIPConfigs(
+	ipv4Addr, ipv4Net, ipv4Gw, ipv4DNS string,
+	ipv6Addr, ipv6Net, ipv6Gw, ipv6DNS string,
+	primary string,
+) []*NetworkIPConfig {
+	var ipv4Config *NetworkIPConfig
+	if ipv4Addr != "" || ipv4Net != "" || ipv4Gw != "" || ipv4DNS != "" {
+		ipv4Config = &NetworkIPConfig{
+			IP:             ipv4Addr,
+			MachineNetwork: ipv4Net,
+			Gateway:        ipv4Gw,
+			DNSServer:      ipv4DNS,
+		}
+	}
+
+	var ipv6Config *NetworkIPConfig
+	if ipv6Addr != "" || ipv6Net != "" || ipv6Gw != "" || ipv6DNS != "" {
+		ipv6Config = &NetworkIPConfig{
+			IP:             ipv6Addr,
+			MachineNetwork: ipv6Net,
+			Gateway:        ipv6Gw,
+			DNSServer:      ipv6DNS,
+		}
+	}
+
+	ipConfigs := []*NetworkIPConfig{}
+	switch primary {
+	case common.IPv4FamilyName:
+		if ipv4Config != nil {
+			ipConfigs = append(ipConfigs, ipv4Config)
+		}
+
+		if ipv6Config != nil {
+			ipConfigs = append(ipConfigs, ipv6Config)
+		}
+	case common.IPv6FamilyName:
+		if ipv6Config != nil {
+			ipConfigs = append(ipConfigs, ipv6Config)
+		}
+
+		if ipv4Config != nil {
+			ipConfigs = append(ipConfigs, ipv4Config)
+		}
+	}
+
+	return ipConfigs
 }
 
 // detectBrExNetworkInterface discovers the physical interface connected to

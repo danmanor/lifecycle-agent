@@ -462,7 +462,7 @@ func getClusterNetworks(ctx context.Context, client runtimeclient.Client) ([]str
 	return clusterNetworks, network.Status.ServiceNetwork, nil
 }
 
-func GetInstallConfig(ctx context.Context, client runtimeclient.Client) (string, error) {
+func GetInstallConfig(ctx context.Context, client runtimeclient.Reader) (string, error) {
 	if client == nil {
 		return "", fmt.Errorf("runtime client not available")
 	}
@@ -518,4 +518,34 @@ func GetNodeInternalIPs(ctx context.Context, client client.Reader) ([]string, er
 	}
 
 	return ips, nil
+}
+
+// installConfigSubset captures only the fields we need from install-config
+type installConfigSubset struct {
+	Networking struct {
+		MachineNetwork []struct {
+			CIDR string `yaml:"cidr"`
+		} `yaml:"machineNetwork"`
+	} `yaml:"networking"`
+}
+
+func GetMachineNetworks(ctx context.Context, client runtimeclient.Reader) ([]string, error) {
+	installConfig, err := GetInstallConfig(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get install config: %w", err)
+	}
+
+	var ic installConfigSubset
+	if err := yaml.Unmarshal([]byte(installConfig), &ic); err != nil {
+		return nil, fmt.Errorf("failed to parse install-config yaml: %w", err)
+	}
+
+	var machineNetworks []string
+	for _, mn := range ic.Networking.MachineNetwork {
+		if mn.CIDR != "" {
+			machineNetworks = append(machineNetworks, mn.CIDR)
+		}
+	}
+
+	return machineNetworks, nil
 }

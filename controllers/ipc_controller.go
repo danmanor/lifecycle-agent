@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -26,7 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	syaml "sigs.k8s.io/yaml"
 
 	ipcv1 "github.com/openshift-kni/lifecycle-agent/api/ipconfig/v1"
 	controllerutils "github.com/openshift-kni/lifecycle-agent/controllers/utils"
@@ -400,85 +398,35 @@ func isIPTransitionRequested(ipc *ipcv1.IPConfig) bool {
 		controllerutils.IsIPStageInProgress(ipc, desiredStage))
 }
 
-type nmAddr struct {
-	IP           string `json:"ip"`
-	PrefixLength int    `json:"prefix-length"`
-}
-
-type nmIPConf struct {
-	Enabled bool     `json:"enabled"`
-	Address []nmAddr `json:"address"`
-}
-
-type nmIf struct {
-	Name   string   `json:"name"`
-	Type   string   `json:"type"`
-	IPv4   nmIPConf `json:"ipv4"`
-	IPv6   nmIPConf `json:"ipv6"`
-	Bridge nmBridge `json:"bridge,omitempty"`
-	VLAN   *nmVLAN  `json:"vlan,omitempty"`
-}
-
-type nmRoute struct {
-	Destination      string `json:"destination"`
-	NextHopAddress   string `json:"next-hop-address"`
-	NextHopInterface string `json:"next-hop-interface"`
-}
-
-type nmRoutes struct {
-	Running []nmRoute `json:"running"`
-	Config  []nmRoute `json:"config"`
-}
-
-type nmDNSList struct {
-	Server []string `json:"server"`
-}
-
-type nmDNS struct {
-	Running nmDNSList `json:"running"`
-	Config  nmDNSList `json:"config"`
-}
-
-type nmState struct {
-	Interfaces  []nmIf   `json:"interfaces"`
-	Routes      nmRoutes `json:"routes"`
-	DNSResolver nmDNS    `json:"dns-resolver"`
-}
-
-type nmBridge struct {
-	Port []struct {
-		Name string `json:"name"`
-	} `json:"port"`
-}
-
-type nmVLAN struct {
-	BaseIface string `json:"base-iface"`
-	ID        int    `json:"id"`
-}
-
 func (r *IPConfigReconciler) refreshStatus(ctx context.Context, ipc *ipcv1.IPConfig) error {
 	output, err := r.nmstateShowJSON()
 	if err != nil {
 		return err
 	}
 
-	state, err := parseNmstate(output)
+	state, err := lcautils.ParseNmstate(output)
 	if err != nil {
 		return err
 	}
 
-	dnsV4, dnsV6 := extractDNS(state)
-	gw4, gw6 := findDefaultGateways(state)
-	vlanID, err := extractBrExVLANID(state)
+	dnsV4, dnsV6 := lcautils.ExtractDNS(state)
+	gw4, gw6 := lcautils.FindDefaultGateways(
+		state,
+		controllerutils.BridgeExternalName,
+		controllerutils.DefaultRouteV4,
+		controllerutils.DefaultRouteV6,
+	)
+	vlanID, err := lcautils.ExtractBrExVLANID(state, controllerutils.BridgeExternalName)
 	if err != nil {
 		return err
 	}
 
-	nodeIPs, err := r.findNodeIPs(ctx)
+	nodeIPs, err := lcautils.GetNodeInternalIPs(ctx, r.NoncachedClient)
 	if err != nil {
 		return fmt.Errorf("failed to find node IPs: %w", err)
 	}
-	machineCIDRs, err := r.findMachineNetworks(ctx)
+
+	machineCIDRs, err := lcautils.GetMachineNetworks(ctx, r.NoncachedClient)
 	if err != nil {
 		return fmt.Errorf("failed to find machine networks: %w", err)
 	}
@@ -553,72 +501,6 @@ func (r *IPConfigReconciler) inferDNSResolutionFamilyFromMC(ctx context.Context)
 	return lo.ToPtr("none"), nil
 }
 
-// installConfigSubset captures only the fields we need from install-config
-type installConfigSubset struct {
-	Networking struct {
-		MachineNetwork []struct {
-			CIDR string `yaml:"cidr"`
-		} `yaml:"machineNetwork"`
-	} `yaml:"networking"`
-}
-
-func (r *IPConfigReconciler) findNodeIPs(ctx context.Context) ([]string, error) {
-	podName := os.Getenv("MY_POD_NAME")
-	podNS := os.Getenv("MY_POD_NAMESPACE")
-	if podName == "" || podNS == "" {
-		podNS = common.LcaNamespace
-	}
-
-	pod := &corev1.Pod{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNS}, pod); err != nil {
-		return nil, fmt.Errorf("failed to get controller pod: %w", err)
-	}
-
-	node := &corev1.Node{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); err != nil {
-		return nil, fmt.Errorf("failed to get node %s: %w", pod.Spec.NodeName, err)
-	}
-
-	var nodeIPs []string
-	for _, a := range node.Status.Addresses {
-		if a.Type != corev1.NodeInternalIP {
-			continue
-		}
-		nodeIPs = append(nodeIPs, a.Address)
-	}
-
-	return nodeIPs, nil
-}
-
-func (r *IPConfigReconciler) findMachineNetworks(ctx context.Context) ([]string, error) {
-	cm := &corev1.ConfigMap{}
-	if err := r.Client.Get(
-		ctx, types.NamespacedName{
-			Name:      common.InstallConfigCM,
-			Namespace: common.InstallConfigCMNamespace,
-		}, cm,
-	); err != nil {
-		return nil, fmt.Errorf("failed to get cluster-config-v1 configmap: %w", err)
-	}
-	icRaw, ok := cm.Data[common.InstallConfigCMInstallConfigDataKey]
-	if !ok {
-		return nil, fmt.Errorf("install-config key missing in cluster-config-v1 configmap")
-	}
-
-	var ic installConfigSubset
-	if err := syaml.Unmarshal([]byte(icRaw), &ic); err != nil {
-		return nil, fmt.Errorf("failed to parse install-config yaml: %w", err)
-	}
-
-	var machineCIDRs []string
-	for _, mn := range ic.Networking.MachineNetwork {
-		if mn.CIDR != "" {
-			machineCIDRs = append(machineCIDRs, mn.CIDR)
-		}
-	}
-	return machineCIDRs, nil
-}
-
 func (r *IPConfigReconciler) nmstateShowJSON() (string, error) {
 	output, err := r.NsenterOps.RunInHostNamespace("nmstatectl", "show", "--json", "-q")
 	if err != nil {
@@ -626,53 +508,6 @@ func (r *IPConfigReconciler) nmstateShowJSON() (string, error) {
 	}
 
 	return output, nil
-}
-
-func parseNmstate(output string) (nmState, error) {
-	var state nmState
-
-	if err := json.Unmarshal([]byte(output), &state); err != nil {
-		return state, fmt.Errorf("failed to parse nmstate JSON: %w", err)
-	}
-	return state, nil
-}
-
-func extractDNS(state nmState) (string, string) {
-	dnsServers := state.DNSResolver.Running.Server
-	if len(dnsServers) == 0 {
-		dnsServers = state.DNSResolver.Config.Server
-	}
-
-	var dnsV4, dnsV6 string
-	for _, s := range dnsServers {
-		if strings.Contains(s, ":") {
-			if dnsV6 == "" {
-				dnsV6 = s
-			}
-		} else {
-			if dnsV4 == "" {
-				dnsV4 = s
-			}
-		}
-	}
-	return dnsV4, dnsV6
-}
-
-func findDefaultGateways(state nmState) (string, string) {
-	findGW := func(dest string) string {
-		for _, rt := range state.Routes.Running {
-			if rt.Destination == dest && (rt.NextHopInterface == "" || rt.NextHopInterface == controllerutils.BridgeExternalName) {
-				return rt.NextHopAddress
-			}
-		}
-		for _, rt := range state.Routes.Config {
-			if rt.Destination == dest && (rt.NextHopInterface == "" || rt.NextHopInterface == controllerutils.BridgeExternalName) {
-				return rt.NextHopAddress
-			}
-		}
-		return ""
-	}
-	return findGW(controllerutils.DefaultRouteV4), findGW(controllerutils.DefaultRouteV6)
 }
 
 func buildHostAndCluster(
@@ -703,13 +538,13 @@ func buildHostAndCluster(
 	if nodeIPv4 != "" {
 		cluster.IPv4 = &ipcv1.ClusterIPStatus{
 			Address:        nodeIPv4,
-			MachineNetwork: findMatchingCIDR(nodeIPv4, machineCIDRs),
+			MachineNetwork: lcautils.FindMatchingCIDR(nodeIPv4, machineCIDRs),
 		}
 	}
 	if nodeIPv6 != "" {
 		cluster.IPv6 = &ipcv1.ClusterIPStatus{
 			Address:        nodeIPv6,
-			MachineNetwork: findMatchingCIDR(nodeIPv6, machineCIDRs),
+			MachineNetwork: lcautils.FindMatchingCIDR(nodeIPv6, machineCIDRs),
 		}
 	}
 
@@ -734,56 +569,26 @@ func buildHostAndCluster(
 	return host, cluster
 }
 
-// findMatchingCIDR returns the first CIDR from the list that contains the given IP
-// and matches its IP family. If none is found, returns an empty string.
-func findMatchingCIDR(ipStr string, cidrs []string) string {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return ""
-	}
-	isV4 := ip.To4() != nil
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err != nil || n == nil {
-			continue
-		}
-		if (n.IP.To4() != nil) != isV4 {
-			continue
-		}
-		if n.Contains(ip) {
-			return c
-		}
-	}
-	return ""
-}
-
-// extractBrExUplinkName returns the uplink port name connected to br-ex (excluding the br-ex internal and patch ports)
-func extractBrExUplinkName(state nmState) (*string, error) {
-	for _, intf := range state.Interfaces {
-		if intf.Name == controllerutils.BridgeExternalName && intf.Type == "ovs-bridge" {
-			for _, p := range intf.Bridge.Port {
-				if !strings.Contains(p.Name, controllerutils.BridgeExternalName) && p.Name != "" {
-					return &p.Name, nil
-				}
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("br-ex uplink port not found")
-}
-
-// extractBrExVLANID inspects the br-ex uplink port; if it's a VLAN interface, returns its VLAN ID.
-func extractBrExVLANID(state nmState) (*int, error) {
-	uplink, err := extractBrExUplinkName(state)
+// ReadIPConfigStatus reads and parses the status file, returning phase and message.
+// Returns Unknown when the file is not found.
+func ReadIPConfigStatus(filePath string, ops ops.Ops) (common.IPConfigRunStatusPhase, string, error) {
+	data, err := ops.ReadFile(filePath)
 	if err != nil {
-		return nil, err
-	}
-
-	for _, intf := range state.Interfaces {
-		if intf.Name == lo.FromPtr(uplink) && intf.Type == "vlan" && intf.VLAN != nil {
-			return &intf.VLAN.ID, nil
+		if ops.IsNotExist(err) {
+			return common.IPConfigPhaseUnknown, "", nil
 		}
+		return common.IPConfigPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)
 	}
 
-	return nil, nil
+	var st common.IPConfigRunStatus
+	if err := json.Unmarshal(data, &st); err != nil {
+		return common.IPConfigPhaseUnknown, "", fmt.Errorf("failed to parse status file %s: %w", filePath, err)
+	}
+
+	switch st.Phase {
+	case common.IPConfigPhaseRunning, common.IPConfigPhaseSucceeded, common.IPConfigPhaseFailed:
+		return st.Phase, st.Message, nil
+	default:
+		return common.IPConfigPhaseUnknown, st.Message, nil
+	}
 }

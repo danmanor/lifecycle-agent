@@ -1,6 +1,7 @@
 package reboot
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -292,13 +293,8 @@ func NewIPCRebootClient(log *logr.Logger,
 }
 
 // WriteIPCAutoRollbackConfigFile writes the IP-config auto-rollback configuration
-func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error {
+func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig, ops ops.Ops) error {
 	cfgfile := common.PathOutsideChroot(common.IPCAutoRollbackConfigFile)
-
-	cfgdir := filepath.Dir(cfgfile)
-	if err := os.MkdirAll(cfgdir, 0o700); err != nil {
-		return fmt.Errorf("unable to create config dir: %s: %w", cfgdir, err)
-	}
 
 	monitorTimeout := common.IPCAutoRollbackInitMonitorTimeoutDefaultSeconds
 	if ipc != nil && ipc.Spec.AutoRollbackOnFailure != nil && ipc.Spec.AutoRollbackOnFailure.InitMonitorTimeoutSeconds > 0 {
@@ -314,30 +310,38 @@ func WriteIPCAutoRollbackConfigFile(log logr.Logger, ipc *ipcv1.IPConfig) error 
 		}
 	}
 
-	ipcRunEnabled := true
+	enabledComponents := map[string]bool{
+		IPConfigRunComponent: true,
+	}
 	if ipc != nil {
-		if val, exists := ipc.GetAnnotations()[common.IPCAutoRollbackOnFailureRunAnnotation]; exists {
+		if val, exists := ipc.GetAnnotations()[common.AutoRollbackOnFailureIPConfigRunAnnotation]; exists {
 			if val == common.AutoRollbackDisableValue {
-				ipcRunEnabled = false
+				enabledComponents[IPConfigRunComponent] = false
 			}
 		}
 	}
 
 	log.Info("IPConfig Auto-rollback init monitor timeout", "monitorTimeout", monitorTimeout)
 	log.Info("IPConfig Auto-rollback init monitor enabled", "initMonitorEnabled", initMonitorEnabled)
-	log.Info("IPConfig Auto-rollback run enabled", "ipConfigRunEnabled", ipcRunEnabled)
+	log.Info("IPConfig Auto-rollback ipconfig run enabled", "enabledComponents", enabledComponents)
 
 	rollbackCfg := AutoRollbackConfig{
 		InitMonitorEnabled: initMonitorEnabled,
 		InitMonitorTimeout: monitorTimeout,
-		EnabledComponents:  map[string]bool{IPConfigRunComponent: ipcRunEnabled},
+		EnabledComponents:  enabledComponents,
 	}
 
-	if err := lcautils.MarshalToFile(rollbackCfg, cfgfile); err != nil {
-		return fmt.Errorf("failed to write ip-config rollback config file in %s: %w", cfgfile, err)
+	data, err := json.Marshal(rollbackCfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal rollback config: %w", err)
 	}
 
-	log.Info(fmt.Sprintf("IPConfig auto-rollback config saved to %s", cfgdir))
+	if err := ops.WriteFile(cfgfile, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write ip-config auto-rollback config file in %s: %w", cfgfile, err)
+	}
+
+	log.Info(fmt.Sprintf("IPConfig auto-rollback config saved to %s", cfgfile))
+
 	return nil
 }
 
@@ -421,8 +425,7 @@ func (c *IPCRebootClient) IsOrigStaterootBooted(identifier string) (bool, error)
 	c.log.Info(
 		"stateroots",
 		"current stateroot:", currentStaterootName,
-		"desired stateroot",
-		common.GetStaterootName(identifier),
+		"desired stateroot:", common.GetStaterootName(identifier),
 	)
 
 	return currentStaterootName != common.GetStaterootName(identifier), nil

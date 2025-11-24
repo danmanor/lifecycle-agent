@@ -16,12 +16,6 @@ import (
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// FileOpsReader defines minimal file operations needed to read status
-type FileOpsReader interface {
-	ReadFile(string) ([]byte, error)
-	IsNotExist(error) bool
-}
-
 // WriteIPConfigStatus writes the given status struct to the provided file path.
 func WriteIPConfigStatus(filePath string, st IPConfigRunStatus) error {
 	dir := filepath.Dir(filePath)
@@ -48,30 +42,6 @@ func FinalizeIPConfigStatus(filePath string, phase IPConfigRunStatusPhase, msg s
 		}
 	}
 	return WriteIPConfigStatus(filePath, st)
-}
-
-// ReadIPConfigStatus reads and parses the status file, returning phase and message.
-// Returns Unknown when the file is not found.
-func ReadIPConfigStatus(filePath string, fops FileOpsReader) (IPConfigRunStatusPhase, string, error) {
-	data, err := fops.ReadFile(filePath)
-	if err != nil {
-		if fops.IsNotExist(err) {
-			return IPConfigPhaseUnknown, "", nil
-		}
-		return IPConfigPhaseUnknown, "", fmt.Errorf("failed to read status file %s: %w", filePath, err)
-	}
-
-	var st IPConfigRunStatus
-	if err := json.Unmarshal(data, &st); err != nil {
-		return IPConfigPhaseUnknown, "", fmt.Errorf("failed to parse status file %s: %w", filePath, err)
-	}
-
-	switch st.Phase {
-	case IPConfigPhaseRunning, IPConfigPhaseSucceeded, IPConfigPhaseFailed:
-		return st.Phase, st.Message, nil
-	default:
-		return IPConfigPhaseUnknown, st.Message, nil
-	}
 }
 
 type IPConfigRunConfig struct {

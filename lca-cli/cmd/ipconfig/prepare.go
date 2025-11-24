@@ -186,8 +186,8 @@ func runIPConfigPrepare() error {
 // logPrepareFlags prints the flags used by the ip-config prepare command.
 func logPrepareFlags() {
 	pkgLog.Infof("ip-config prepare flags:")
-	pkgLog.Infof("  --%s=%q", newStaterootNameFlag, newStaterootName)
-	pkgLog.Infof("  --%s=%t", installInitMonitorFlag, installInitMonitor)
+	pkgLog.Infof("  %s=%q", newStaterootNameFlag, newStaterootName)
+	pkgLog.Infof("  %s=%t", installInitMonitorFlag, installInitMonitor)
 }
 
 // installMonitorInitializationServiceInNewStateroot installs and enables the IPC init monitor service

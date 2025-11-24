@@ -88,7 +88,7 @@ func (h *IPConfigRollbackStageHandler) Handle(
 		}
 	}
 
-	phase, message, err := common.ReadIPConfigStatus(
+	phase, message, err := ReadIPConfigStatus(
 		common.PathOutsideChroot(common.IPConfigRollbackStatusFile),
 		h.ChrootOps,
 	)
